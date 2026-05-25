@@ -19,6 +19,13 @@ Since there was no progress I decided to merge the most important PRs manually a
 
 I appreciate every contribution to this library.
 
+> [!IMPORTANT]
+> This repository is a maintained fork of `hmueller01/pubsubclient3`.
+>
+> Upstream compatibility:
+> - based on upstream `v3.3.0`
+> - fork-specific patches and fixes may exist
+
 ## Examples
 
 The library comes with a number of example sketches. See File > Examples > PubSubClient
