@@ -373,21 +373,21 @@ bool PubSubClient::handlePacket(uint8_t hdrLen, size_t length) {
                 // - Payload (for QoS > 0): length - (hdrLen + 5 + topicLen) bytes (starts at _buffer[hdrLen + 5 + topicLen])
                 // To get a null reminated 'C' topic string we move the topic 1 byte to the front (overwriting the LSB of the topic lenght)
                 // Guard 1: ensure topic length bytes are readable
-                if ((hdrLen + 2) >= length || (hdrLen + 2) >= _bufferSize) {
+                if ((hdrLen + 2 >= length) || (hdrLen + 2 >= _bufferSize)) {
                     ERROR_PSC_PRINTF_P("handlePacket(): Packet too short to contain topic length field\n");
                     return false;
                 }
                 uint16_t topicLen = (_buffer[hdrLen + 1] << 8) + _buffer[hdrLen + 2];  // topic length in bytes
                 char* topic = (char*)(_buffer + hdrLen + 3 - 1);                       // set the topic in the LSB of the topic lenght, as we move it there
                 uint16_t payloadOffset = hdrLen + 3 + topicLen;  // payload starts after header and topic (if there is no packet identifier)
+                size_t payloadLen = length - payloadOffset;      // this might change by 2 if we have a QoS 1 or 2 message
+                uint8_t* payload = _buffer + payloadOffset;
 
                 // Guard 2: ensure topic and payload fit in buffer
-                if (payloadOffset > _bufferSize || payloadOffset > length) {
+                if ((payloadOffset > _bufferSize) || (payloadOffset > length)) {
                     ERROR_PSC_PRINTF_P("handlePacket(): Topic extends outside buffer/data\n");
                     return false;
                 }
-                size_t payloadLen = length - payloadOffset;      // this might change by 2 if we have a QoS 1 or 2 message
-                uint8_t* payload = _buffer + payloadOffset;
                 memmove(topic, topic + 1, topicLen);  // move topic inside buffer 1 byte to front
                 topic[topicLen] = '\0';               // end the topic as a 'C' string with \x00
 
@@ -396,7 +396,8 @@ bool PubSubClient::handlePacket(uint8_t hdrLen, size_t length) {
                     callback(topic, payload, payloadLen);
                 } else {
                     // For QOS 1 and 2 we have a msgId (packet identifier) after the topic at the current payloadOffset
-                    if (payloadLen < 2 || (payloadOffset + 1) >= _bufferSize) {  // Guard 3: msgId must be addressable
+                    // Guard 3: msgId must be addressable
+                    if ((payloadLen < 2) || (payloadOffset + 1 >= _bufferSize)) {
                         ERROR_PSC_PRINTF_P("handlePacket(): Missing or out-of-bounds msgId in QoS 1/2\n");
                         return false;
                     }
