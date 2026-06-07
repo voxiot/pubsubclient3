@@ -371,11 +371,11 @@ bool PubSubClient::handlePacket(uint8_t hdrLen, size_t length) {
                 // - Payload (for QoS = 0): length - (hdrLen + 3 + topicLen) bytes (starts at _buffer[hdrLen + 3 + topicLen])
                 // - Payload (for QoS > 0): length - (hdrLen + 5 + topicLen) bytes (starts at _buffer[hdrLen + 5 + topicLen])
                 // To get a null reminated 'C' topic string we move the topic 1 byte to the front (overwriting the LSB of the topic lenght)
-                uint16_t topicLen = (_buffer[hdrLen + 1] << 8) + _buffer[hdrLen + 2];  // topic length in bytes
-                char* topic = (char*)(_buffer + hdrLen + 3 - 1);                       // set the topic in the LSB of the topic lenght, as we move it there
-                uint16_t payloadOffset = hdrLen + 3 + topicLen;  // payload starts after header and topic (if there is no packet identifier)
-                size_t payloadLen = length - payloadOffset;      // this might change by 2 if we have a QoS 1 or 2 message
-                uint8_t* payload = _buffer + payloadOffset;
+                const uint16_t topicLen = (_buffer[hdrLen + 1] << 8) + _buffer[hdrLen + 2];  // topic length in bytes
+                char* const topic = (char*)(_buffer + hdrLen + 3 - 1);                       // set the topic in the LSB of the topic lenght, as we move it there
+                const uint16_t payloadOffset = hdrLen + 3 + topicLen;  // payload starts after header and topic (if there is no packet identifier)
+                const size_t payloadLen = length - payloadOffset;      // this might change by 2 if we have a QoS 1 or 2 message
+                uint8_t* const payload = _buffer + payloadOffset;
 
                 if (length < payloadOffset) {  // do not move outside the max bufferSize
                     ERROR_PSC_PRINTF_P("handlePacket(): Suspicious topicLen (%u) points outside of received buffer length (%zu)\n", topicLen, length);
@@ -393,16 +393,16 @@ bool PubSubClient::handlePacket(uint8_t hdrLen, size_t length) {
                         ERROR_PSC_PRINTF_P("handlePacket(): Missing msgId in QoS 1/2 message\n");
                         return false;
                     }
-                    uint8_t publishQos = MQTT_HDR_GET_QOS(_buffer[0]);  // save QoS before _buffer[0] is overwritten
-                    uint16_t msgId = (_buffer[payloadOffset] << 8) + _buffer[payloadOffset + 1];
+                    const uint8_t publishQos = MQTT_HDR_GET_QOS(_buffer[0]);  // save QoS before _buffer[0] is overwritten
+                    const uint16_t msgId = (_buffer[payloadOffset] << 8) + _buffer[payloadOffset + 1];
                     callback(topic, payload + 2, payloadLen - 2);  // remove the msgId from the callback payload
 
                     // QoS 1: respond with PUBACK
                     // QoS 2: respond with PUBREC (first step of the QoS 2 subscriber handshake)
                     _buffer[0] = (publishQos == MQTT_QOS1) ? MQTTPUBACK : MQTTPUBREC;
                     _buffer[1] = 2;
-                    _buffer[2] = (msgId >> 8);
-                    _buffer[3] = (msgId & 0xFF);
+                    _buffer[2] = (uint8_t)(msgId >> 8);
+                    _buffer[3] = (uint8_t)(msgId & 0xFF);
                     if (_client->write(_buffer, 4) == 4) {
                         _lastOutActivity = millis();
                     }
