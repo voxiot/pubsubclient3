@@ -373,7 +373,7 @@ bool PubSubClient::handlePacket(uint8_t hdrLen, size_t length) {
                 // - Payload (for QoS > 0): length - (hdrLen + 5 + topicLen) bytes (starts at _buffer[hdrLen + 5 + topicLen])
                 // To get a null reminated 'C' topic string we move the topic 1 byte to the front (overwriting the LSB of the topic lenght)
                 // Guard 1: ensure topic length bytes are readable
-                if (((size_t)hdrLen + 2 >= length) || ((size_t)hdrLen + 2 >= _bufferSize)) {
+                if ((hdrLen + 2ul >= length) || ((size_t)hdrLen + 2 >= _bufferSize)) {
                     ERROR_PSC_PRINTF_P("handlePacket(): Packet too short to contain topic length field\n");
                     return false;
                 }
