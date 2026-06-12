@@ -17,13 +17,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Changed
 
-* `bufferWritePos`: changed type from `uint16_t` to `size_t` for better compatibility with larger buffers
-* `handlePacket()`: added const qualifiers to local variables (topicLen, payloadOffset, payloadLen, msgId, publishQos)
-* Improved type safety with const references for topic and payload pointers
-* Added explicit type casts for safer integer conversions
-
-### Changed
-
 * Improved test coverage for all QoS levels (0, 1, 2)
 * Increased robustness and correctness in client-side handling of QoS 1 and QoS 2 messages (proper handling of PUBACK, PUBREC, PUBREL, PUBCOMP sequences)
 * Merged and cleaned up tests to ensure MQTT protocol compliance for all QoS scenarios
