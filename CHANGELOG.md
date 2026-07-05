@@ -7,6 +7,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+### Fixed
+
+* Add buffer safety checks to prevent out-of-bounds access
+* `connect()`: added null-buffer guard to prevent crash if buffer allocation failed at construction
+* `disconnect()`: added null-buffer guard for safety
+* `loop()`: added upfront guard to ensure buffer exists and is large enough before readPacket/handlePacket
+* `handlePacket()`: added three ordered boundary checks to prevent out-of-bounds access when reading topic length and msgId fields
+
 ### Changed
 
 * Improved test coverage for all QoS levels (0, 1, 2)
