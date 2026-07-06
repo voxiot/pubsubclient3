@@ -129,7 +129,8 @@ bool PubSubClient::connect(const char* id, const char* user, const char* pass, c
         }
 
         if (result == 1) {
-            _nextMsgId = 1;  // init msgId (packet identifier)
+            _nextMsgId = 1;       // init msgId (packet identifier)
+            _bufferWritePos = 0;  // discard pending outgoing data of a previous (dead) session, see appendBuffer()
 
 #if MQTT_VERSION == MQTT_VERSION_3_1
             const uint8_t protocol[9] = {0x00, 0x06, 'M', 'Q', 'I', 's', 'd', 'p', MQTT_VERSION};
@@ -204,7 +205,7 @@ bool PubSubClient::connect(const char* id, const char* user, const char* pass, c
             uint8_t hdrLen;
             size_t len = readPacket(&hdrLen);
 
-            if (len == 4) {
+            if ((len == 4) && ((_buffer[0] & 0xF0) == MQTTCONNACK)) {
                 if (_buffer[3] == 0) {
                     _lastInActivity = millis();
                     _state = MQTT_CONNECTED;
@@ -240,7 +241,7 @@ bool PubSubClient::connected() {
 void PubSubClient::disconnect() {
     DEBUG_PSC_PRINTF("disconnect called\n");
     _state = MQTT_DISCONNECTED;
-    if (_client) {
+    if (_client && _buffer) {  // check _buffer too, as the allocation may have failed
         _buffer[0] = MQTTDISCONNECT;
         _buffer[1] = 0;
         _client->write(_buffer, 2);
@@ -248,6 +249,7 @@ void PubSubClient::disconnect() {
         _client->stop();
         _lastInActivity = _lastOutActivity = millis();
     }
+    _bufferWritePos = 0;  // discard pending outgoing data (beginPublish/write), see appendBuffer()
     _pingOutstanding = false;
 }
 
@@ -936,8 +938,10 @@ PubSubClient& PubSubClient::setStream(Stream& stream) {
 }
 
 bool PubSubClient::setBufferSize(size_t size) {
-    if (size == 0) {
-        // Cannot set it back to 0
+    if (size < MQTT_MAX_HEADER_SIZE + 12) {
+        // Too small: connect() writes up to MQTT_MAX_HEADER_SIZE + 12 bytes (protocol name, version,
+        // flags and keepalive for MQTT 3.1) and readPacket() up to MQTT_MAX_HEADER_SIZE + 3 bytes
+        // into the buffer without further size checks
         return false;
     }
     if (_bufferWritePos >= size) {

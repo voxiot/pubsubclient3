@@ -414,8 +414,9 @@ class PubSubClient : public Print {
      * When sending or receiving messages, the packet will contain the full topic string,
      * the payload data, and a small number of header bytes.
      * @param size The size, in bytes, for the internal buffer.
+     * Must be at least #MQTT_MAX_HEADER_SIZE + 12 bytes to hold the packet headers.
      * @return true If the buffer was resized.
-     * false If the buffer could not be resized.
+     * false If the buffer could not be resized (out of memory or size too small).
      */
     bool setBufferSize(size_t size);
 

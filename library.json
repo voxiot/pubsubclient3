@@ -1,12 +1,12 @@
 {
     "name": "pubsubclient3",
     "keywords": "ethernet, mqtt, m2m, iot",
-    "description": "MQTT library allows you to send and receive messages.",
+    "description": "MQTT library that allows you to send and receive messages.",
     "repository": {
         "type": "git",
         "url": "https://github.com/voxiot/pubsubclient3.git"
     },
-    "version": "3.3.0-vxc.2",
+    "version": "3.3.0-vxc.3",
     "license": "MIT",
     "exclude": "tests",
     "examples": "examples/*/*.ino",
