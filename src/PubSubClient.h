@@ -3,7 +3,7 @@
  * @brief A simple client for MQTT.
  * @author Nicholas O'Leary - http://knolleary.net
  * @author Holger Mueller - https://github.com/hmueller01/pubsubclient3
- * @copyright MIT License 2008-2025
+ * @copyright MIT License 2008-2026
  *
  * This file is part of the PubSubClient library.
  */
@@ -130,8 +130,12 @@
 /// \endcond
 /** @} */
 
-/// \cond Maximum size of fixed header and variable length size header
+/// \cond
+// Maximum size of fixed header and variable length size header
 #define MQTT_MAX_HEADER_SIZE 5
+// Minimal buffer size that can be handled, used to check if the buffer size is sufficient in setBufferSize().
+// MQTT_MAX_HEADER_SIZE (5) + protocol (9) + flags (1) + keepalive (2) covers a minmal CONNECT message
+#define MQTT_MIN_BUFFER_SIZE (MQTT_MAX_HEADER_SIZE + 9 + 1 + 2)
 /// \endcond
 
 /// \anchor callback
@@ -422,6 +426,12 @@ class PubSubClient : public Print {
      * Must be at least #MQTT_MAX_HEADER_SIZE + 12 bytes to hold the packet headers.
      * @return true If the buffer was resized.
      * false If the buffer could not be resized (out of memory or size too small).
+     * @note Changing the buffer size while the client is still connected may result in undefined behavior. It is recommended to change the buffer size
+     * only when the client is disconnected.
+     * @note The buffer size must be at least #MQTT_MIN_BUFFER_SIZE bytes. Otherwise this function will return false and the buffer size will remain
+     * unchanged.
+     * @note In case MQTT is not needed and to save memory, the buffer can be freed by setting the size to 0.
+     * @note If not explicitly set/called, the buffer size will default to #MQTT_MAX_PACKET_SIZE bytes.
      */
     bool setBufferSize(size_t size);
 

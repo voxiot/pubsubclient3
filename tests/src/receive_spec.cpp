@@ -25,7 +25,8 @@ int test_receive_stream();
 int test_receive_max_sized_message();
 int test_drop_invalid_remaining_length_message();
 int test_receive_oversized_message();
-int test_resize_buffer();
+int test_resize_buffer1();
+int test_resize_buffer2();
 int test_receive_oversized_stream_message();
 int test_receive_qos1();
 int test_receive_qos2();
@@ -56,14 +57,14 @@ int test_receive_callback() {
     shimClient.setAllowConnect(true);
 
     byte connack[] = {0x20, 0x02, 0x00, 0x00};
-    shimClient.respond(connack, 4);
+    shimClient.respond(connack, sizeof(connack));
 
     PubSubClient client(server, 1883, callback, shimClient);
     bool rc = client.connect("client_test1");
     IS_TRUE(rc);
 
     byte publish[] = {0x30, 0xe, 0x0, 0x5, 0x74, 0x6f, 0x70, 0x69, 0x63, 0x70, 0x61, 0x79, 0x6c, 0x6f, 0x61, 0x64};
-    shimClient.respond(publish, 16);
+    shimClient.respond(publish, sizeof(publish));
 
     rc = client.loop();
 
@@ -91,14 +92,14 @@ int test_receive_stream() {
     shimClient.setAllowConnect(true);
 
     byte connack[] = {0x20, 0x02, 0x00, 0x00};
-    shimClient.respond(connack, 4);
+    shimClient.respond(connack, sizeof(connack));
 
     PubSubClient client(server, 1883, callback, shimClient, stream);
     bool rc = client.connect("client_test1");
     IS_TRUE(rc);
 
     byte publish[] = {0x30, 0xe, 0x0, 0x5, 0x74, 0x6f, 0x70, 0x69, 0x63, 0x70, 0x61, 0x79, 0x6c, 0x6f, 0x61, 0x64};
-    shimClient.respond(publish, 16);
+    shimClient.respond(publish, sizeof(publish));
 
     rc = client.loop();
 
@@ -122,10 +123,10 @@ int test_receive_max_sized_message() {
     shimClient.setAllowConnect(true);
 
     byte connack[] = {0x20, 0x02, 0x00, 0x00};
-    shimClient.respond(connack, 4);
+    shimClient.respond(connack, sizeof(connack));
 
     PubSubClient client(server, 1883, callback, shimClient);
-    client.setBufferSize(PUBLISH_LEN);
+    IS_TRUE(client.setBufferSize(PUBLISH_LEN));
     bool rc = client.connect("client_test1");
     IS_TRUE(rc);
 
@@ -133,7 +134,7 @@ int test_receive_max_sized_message() {
     byte bigPublish[PUBLISH_LEN];
     memset(bigPublish, 'A', PUBLISH_LEN);
     bigPublish[PUBLISH_LEN - 1] = 'B';
-    memcpy(bigPublish, publish, 16);
+    memcpy(bigPublish, publish, sizeof(publish));
     shimClient.respond(bigPublish, PUBLISH_LEN);
 
     rc = client.loop();
@@ -158,10 +159,10 @@ int test_receive_oversized_message() {
     shimClient.setAllowConnect(true);
 
     byte connack[] = {0x20, 0x02, 0x00, 0x00};
-    shimClient.respond(connack, 4);
+    shimClient.respond(connack, sizeof(connack));
 
     PubSubClient client(server, 1883, callback, shimClient);
-    client.setBufferSize(PUBLISH_LEN - 1);
+    IS_TRUE(client.setBufferSize(PUBLISH_LEN - 1));
     bool rc = client.connect("client_test1");
     IS_TRUE(rc);
 
@@ -169,7 +170,7 @@ int test_receive_oversized_message() {
     byte bigPublish[PUBLISH_LEN];
     memset(bigPublish, 'A', PUBLISH_LEN);
     bigPublish[PUBLISH_LEN - 1] = 'B';
-    memcpy(bigPublish, publish, 16);
+    memcpy(bigPublish, publish, sizeof(publish));
     shimClient.respond(bigPublish, PUBLISH_LEN);
 
     rc = client.loop();
@@ -191,14 +192,14 @@ int test_drop_invalid_remaining_length_message() {
     shimClient.setAllowConnect(true);
 
     byte connack[] = {0x20, 0x02, 0x00, 0x00};
-    shimClient.respond(connack, 4);
+    shimClient.respond(connack, sizeof(connack));
 
     PubSubClient client(server, 1883, callback, shimClient);
     bool rc = client.connect("client_test1");
     IS_TRUE(rc);
 
     byte publish[] = {0x30, 0x92, 0x92, 0x92, 0x92, 0x01, 0x0, 0x5, 0x74, 0x6f, 0x70, 0x69, 0x63, 0x70, 0x61, 0x79, 0x6c, 0x6f, 0x61, 0x64};
-    shimClient.respond(publish, 20);
+    shimClient.respond(publish, sizeof(publish));
 
     rc = client.loop();
 
@@ -211,7 +212,37 @@ int test_drop_invalid_remaining_length_message() {
     END_IT
 }
 
-int test_resize_buffer() {
+int test_resize_buffer1() {
+    IT("resizes the buffer");
+    reset_callback();
+
+    ShimClient shimClient;
+    shimClient.setAllowConnect(true);
+
+    byte connack[] = {0x20, 0x02, 0x00, 0x00};
+    shimClient.respond(connack, sizeof(connack));
+
+    PubSubClient client(server, 1883, callback, shimClient);
+
+    // test to resize the buffer before connecting
+    IS_TRUE(client.setBufferSize(MQTT_MIN_BUFFER_SIZE));
+    IS_TRUE(client.setBufferSize(0));   // test to free the buffer
+    IS_FALSE(client.setBufferSize(1));  // test to set the buffer size below the minimum
+    IS_TRUE(client.setBufferSize(PUBLISH_LEN - 1));
+
+    IS_TRUE(client.connect("client_test1"));
+
+    // Setting the same buffer size again should always succeed
+    IS_TRUE(client.setBufferSize(PUBLISH_LEN - 1));
+    // Resize the buffer after connecting should fail (if the buffer size is changed)
+    // IS_FALSE(client.setBufferSize(PUBLISH_LEN));  // TODO: Not yet implemented in PubSubClient3 V3. Implement with PubSubClient3 V4.
+
+    IS_FALSE(shimClient.error());
+
+    END_IT
+}
+
+int test_resize_buffer2() {
     IT("receives a message larger than the default maximum");
     reset_callback();
 
@@ -219,33 +250,33 @@ int test_resize_buffer() {
     shimClient.setAllowConnect(true);
 
     byte connack[] = {0x20, 0x02, 0x00, 0x00};
-    shimClient.respond(connack, 4);
+    shimClient.respond(connack, sizeof(connack));
 
     PubSubClient client(server, 1883, callback, shimClient);
-    client.setBufferSize(PUBLISH_LEN - 1);
-    bool rc = client.connect("client_test1");
-    IS_TRUE(rc);
+    IS_TRUE(client.setBufferSize(PUBLISH_LEN - 1));
+    IS_TRUE(client.connect("client_test1"));
 
     byte publish[] = {0x30, PUBLISH_LEN - 2, 0x0, 0x5, 0x74, 0x6f, 0x70, 0x69, 0x63, 0x70, 0x61, 0x79, 0x6c, 0x6f, 0x61, 0x64};
     byte bigPublish[PUBLISH_LEN];
     memset(bigPublish, 'A', PUBLISH_LEN);
     bigPublish[PUBLISH_LEN - 1] = 'B';
-    memcpy(bigPublish, publish, 16);
-    // Send it twice
-    shimClient.respond(bigPublish, PUBLISH_LEN);
+    memcpy(bigPublish, publish, sizeof(publish));
     shimClient.respond(bigPublish, PUBLISH_LEN);
 
-    rc = client.loop();
-    IS_TRUE(rc);
+    IS_TRUE(client.loop());
 
     // First message fails as it is too big
     IS_FALSE(callback_called);
 
     // Resize the buffer
-    client.setBufferSize(PUBLISH_LEN);
+    client.disconnect();
+    IS_TRUE(client.setBufferSize(PUBLISH_LEN));
 
-    rc = client.loop();
-    IS_TRUE(rc);
+    shimClient.respond(connack, sizeof(connack));
+    IS_TRUE(client.connect("client_test1"));
+
+    shimClient.respond(bigPublish, PUBLISH_LEN);
+    IS_TRUE(client.loop());
 
     IS_TRUE(callback_called);
 
@@ -268,10 +299,10 @@ int test_receive_oversized_stream_message() {
     shimClient.setAllowConnect(true);
 
     byte connack[] = {0x20, 0x02, 0x00, 0x00};
-    shimClient.respond(connack, 4);
+    shimClient.respond(connack, sizeof(connack));
 
     PubSubClient client(server, 1883, callback, shimClient, stream);
-    client.setBufferSize(PUBLISH_LEN - 1);
+    IS_TRUE(client.setBufferSize(PUBLISH_LEN - 1));
     bool rc = client.connect("client_test1");
     IS_TRUE(rc);
 
@@ -280,7 +311,7 @@ int test_receive_oversized_stream_message() {
     byte bigPublish[PUBLISH_LEN];
     memset(bigPublish, 'A', PUBLISH_LEN);
     bigPublish[PUBLISH_LEN - 1] = 'B';
-    memcpy(bigPublish, publish, 16);
+    memcpy(bigPublish, publish, sizeof(publish));
 
     shimClient.respond(bigPublish, PUBLISH_LEN);
     stream.expect(bigPublish + 9, PUBLISH_LEN - 9);
@@ -308,17 +339,17 @@ int test_receive_qos1() {
     shimClient.setAllowConnect(true);
 
     byte connack[] = {0x20, 0x02, 0x00, 0x00};
-    shimClient.respond(connack, 4);
+    shimClient.respond(connack, sizeof(connack));
 
     PubSubClient client(server, 1883, callback, shimClient);
     bool rc = client.connect("client_test1");
     IS_TRUE(rc);
 
     byte publish[] = {0x32, 0x10, 0x0, 0x5, 0x74, 0x6f, 0x70, 0x69, 0x63, 0x12, 0x34, 0x70, 0x61, 0x79, 0x6c, 0x6f, 0x61, 0x64};
-    shimClient.respond(publish, 18);
+    shimClient.respond(publish, sizeof(publish));
 
     byte puback[] = {0x40, 0x2, 0x12, 0x34};
-    shimClient.expect(puback, 4);
+    shimClient.expect(puback, sizeof(puback));
 
     rc = client.loop();
 
@@ -342,7 +373,7 @@ int test_receive_qos2() {
     shimClient.setAllowConnect(true);
 
     byte connack[] = {0x20, 0x02, 0x00, 0x00};
-    shimClient.respond(connack, 4);
+    shimClient.respond(connack, sizeof(connack));
 
     PubSubClient client(server, 1883, callback, shimClient);
     bool rc = client.connect("client_test1");
@@ -352,11 +383,11 @@ int test_receive_qos2() {
     // Fixed header 0x34, remaining length 0x10 (16), topic len 0x0005, topic "topic",
     // msgId 0x1234, payload "payload"
     byte publish[] = {0x34, 0x10, 0x0, 0x5, 0x74, 0x6f, 0x70, 0x69, 0x63, 0x12, 0x34, 0x70, 0x61, 0x79, 0x6c, 0x6f, 0x61, 0x64};
-    shimClient.respond(publish, 18);
+    shimClient.respond(publish, sizeof(publish));
 
     // Client must respond with PUBREC (0x50), remaining length 2, msgId 0x1234
     byte pubrec[] = {0x50, 0x02, 0x12, 0x34};
-    shimClient.expect(pubrec, 4);
+    shimClient.expect(pubrec, sizeof(pubrec));
 
     rc = client.loop();
     IS_TRUE(rc);
@@ -370,11 +401,11 @@ int test_receive_qos2() {
 
     // Broker sends PUBREL (0x62 = MQTTPUBREL | bit1), remaining length 2, msgId 0x1234
     byte pubrel[] = {0x62, 0x02, 0x12, 0x34};
-    shimClient.respond(pubrel, 4);
+    shimClient.respond(pubrel, sizeof(pubrel));
 
     // Client must respond with PUBCOMP (0x70), remaining length 2, msgId 0x1234
     byte pubcomp[] = {0x70, 0x02, 0x12, 0x34};
-    shimClient.expect(pubcomp, 4);
+    shimClient.expect(pubcomp, sizeof(pubcomp));
 
     rc = client.loop();
     IS_TRUE(rc);
@@ -491,7 +522,8 @@ int main() {
     test_receive_max_sized_message();
     test_drop_invalid_remaining_length_message();
     test_receive_oversized_message();
-    test_resize_buffer();
+    test_resize_buffer1();
+    test_resize_buffer2();
     test_receive_oversized_stream_message();
     test_receive_qos1();
     test_receive_qos2();

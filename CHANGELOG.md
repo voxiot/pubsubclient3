@@ -7,19 +7,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+## [3.3.2] - 2026-09-27
+
 ### Fixed
 
-* Add buffer safety checks to prevent out-of-bounds access
-* `connect()`: added null-buffer guard to prevent crash if buffer allocation failed at construction
-* `disconnect()`: added null-buffer guard for safety
-* `loop()`: added upfront guard to ensure buffer exists and is large enough before readPacket/handlePacket
-* `handlePacket()`: added three ordered boundary checks to prevent out-of-bounds access when reading topic length and msgId fields
+* Prevent `uint16_t payloadOffset` truncation regression in `handlePacket()` and `uint16_t length` in `subscribeImpl()`/`unsubscribeImpl()` by @router0mail in [#104](https://github.com/hmueller01/pubsubclient3/pull/104)
+
+## [3.3.1] - 2026-09-13
+
+Thanks to @MarcAntoineCRUE and @irrwisch1 for the contribution and inputs of this release.
+
+### Fixed
+
+* Add comprehensive buffer safety checks to prevent out-of-bounds memory access
+* Fixed client-side handling of QoS 1 and QoS 2 messages with proper handling of PUBACK, PUBREC, PUBREL, and PUBCOMP sequences
+* Prevent possible bug in setBufferSize()
+* Various compiler type improvements
+* Replace yield with delay on ESP32/FreeRTOS based environments
 
 ### Changed
 
-* Improved test coverage for all QoS levels (0, 1, 2)
-* Increased robustness and correctness in client-side handling of QoS 1 and QoS 2 messages (proper handling of PUBACK, PUBREC, PUBREL, PUBCOMP sequences)
-* Merged and cleaned up tests to ensure MQTT protocol compliance for all QoS scenarios
+* Improved and expanded test coverage for all QoS levels (0, 1, and 2)
 
 ## [3.3.0] - 2025-12-14
 

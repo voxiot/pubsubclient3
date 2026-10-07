@@ -3,12 +3,29 @@
  * @brief A simple client for MQTT.
  * @author Nicholas O'Leary - http://knolleary.net
  * @author Holger Mueller - https://github.com/hmueller01/pubsubclient3
- * @copyright MIT License 2008-2025
+ * @copyright MIT License 2008-2026
  *
  * This file is part of the PubSubClient library.
  */
 
 #include "PubSubClient.h"
+
+/**
+ * @brief Give other tasks a chance to run while waiting for data.
+ *
+ * On FreeRTOS a yield only reschedules a task of equal or higher priority, which is
+ * what a real time scheduler has to promise. A task spinning in a wait loop therefore
+ * never lets the idle task run, and a watchdog fed from that idle task fires. Blocking
+ * for a single tick is what actually hands the CPU over.
+ *
+ * vTaskDelay(1) rather than delay(1): the intent is one tick, and delay(ms) maps to
+ * vTaskDelay(ms / portTICK_PERIOD_MS), which rounds down to zero below a 1 kHz tick.
+ */
+#if defined(ARDUINO_ARCH_ESP32) || defined(ESP32)
+#define PUBSUB_WAIT_YIELD() vTaskDelay(1)
+#else
+#define PUBSUB_WAIT_YIELD() yield()
+#endif
 
 /**
  * @brief Macro to check if a string 's' can be safely added to the MQTT _buffer.
@@ -186,7 +203,7 @@ bool PubSubClient::connect(const char* id, const char* user, const char* pass, c
             _pingOutstanding = false;
 
             while (!_client->available()) {
-                yield();
+                PUBSUB_WAIT_YIELD();
                 if (!_client->connected()) {
                     // fail fast instead of waiting for the socket timeout
                     DEBUG_PSC_PRINTF("connect aborting due to lost connection\n");
@@ -226,6 +243,7 @@ bool PubSubClient::connect(const char* id, const char* user, const char* pass, c
 
 bool PubSubClient::connected() {
     if (!_client) return false;
+    if (!_buffer) return false;  // we can't be connected if we don't have a buffer to read into
 
     if (_client->connected()) {
         return (_state == MQTT_CONNECTED);
@@ -264,7 +282,7 @@ bool PubSubClient::readByte(uint8_t* result) {
 
     unsigned long previousMillis = millis();
     while (!_client->available()) {
-        yield();
+        PUBSUB_WAIT_YIELD();
         unsigned long currentMillis = millis();
         if (currentMillis - previousMillis >= _socketTimeoutMillis) {
             return false;
@@ -377,7 +395,12 @@ size_t PubSubClient::readPacket(uint8_t* hdrLen) {
  */
 bool PubSubClient::handlePacket(uint8_t hdrLen, size_t length) {
     uint8_t type = _buffer[0] & 0xF0;
-    DEBUG_PSC_PRINTF("received message of type %u\n", type);
+    DEBUG_PSC_PRINTF("handlePacket(): received message of type %u\n", type);
+    if (length > _bufferSize) {
+        // This should never happen as readPacket() prevents buffer overflow, but we check again here to be sure and prevent any buffer overflows.
+        DEBUG_PSC_PRINTF("handlePacket(): packet length %zu exceeds buffer size %zu\n", length, _bufferSize);
+        return false;
+    }
     switch (type) {
         case MQTTPUBLISH:
             if (callback) {
@@ -389,15 +412,23 @@ bool PubSubClient::handlePacket(uint8_t hdrLen, size_t length) {
                 // - Packet Identifier (msgId): 0 bytes for QoS 0, 2 bytes for QoS 1 and 2 (starts at _buffer[hdrLen + 3 + topicLen])
                 // - Payload (for QoS = 0): length - (hdrLen + 3 + topicLen) bytes (starts at _buffer[hdrLen + 3 + topicLen])
                 // - Payload (for QoS > 0): length - (hdrLen + 5 + topicLen) bytes (starts at _buffer[hdrLen + 5 + topicLen])
-                // To get a null reminated 'C' topic string we move the topic 1 byte to the front (overwriting the LSB of the topic lenght)
-                uint16_t topicLen = (_buffer[hdrLen + 1] << 8) + _buffer[hdrLen + 2];  // topic length in bytes
-                char* topic = (char*)(_buffer + hdrLen + 3 - 1);                       // set the topic in the LSB of the topic lenght, as we move it there
-                // payloadOffset must be size_t: with a 16-bit type hdrLen + 3 + topicLen may wrap around
-                // for a large (forged) topicLen and bypass the bounds check below
-                size_t payloadOffset = (size_t)hdrLen + 3 + topicLen;  // payload starts after header and topic (if there is no packet identifier)
-                uint8_t publishQos = MQTT_HDR_GET_QOS(_buffer[0]);     // save QoS before _buffer[0] is overwritten
+                // To get a null terminated 'C' topic string we move the topic 1 byte to the front (overwriting the LSB of the topic lenght)
+                // Guard 1: ensure topic length bytes are readable
+                if (length < hdrLen + 3ul) {
+                    DEBUG_PSC_PRINTF("handlePacket(): Packet too short to contain topic length field\n");
+                    return false;
+                }
+                const uint16_t topicLen = (_buffer[hdrLen + 1] << 8) + _buffer[hdrLen + 2];  // topic length in bytes
+                char* topic = (char*)(_buffer + hdrLen + 3 - 1);  // set the topic in the LSB of the topic lenght, as we move it there later
+                // Use size_t here: hdrLen + 3 + topicLen can reach 65539, which
+                // wraps a uint16_t (e.g. topicLen = 0xFFFF wraps to 3), silently
+                // defeating Guard 2 below and letting an attacker-chosen topicLen
+                // reach the memmove/write further down.
+                const size_t payloadOffset = (size_t)hdrLen + 3 + topicLen;  // payload starts after header and topic (if there is no packet identifier)
+                const uint8_t publishQos = MQTT_HDR_GET_QOS(_buffer[0]);     // save QoS before _buffer[0] is overwritten
 
-                if (length < payloadOffset) {  // do not move outside the max bufferSize
+                // Guard 2: ensure topic fits in buffer
+                if (length < payloadOffset) {
                     ERROR_PSC_PRINTF_P("handlePacket(): Suspicious topicLen (%u) points outside of received buffer length (%zu)\n", topicLen, length);
                     return false;
                 }
@@ -405,10 +436,10 @@ bool PubSubClient::handlePacket(uint8_t hdrLen, size_t length) {
                     ERROR_PSC_PRINTF_P("handlePacket(): Invalid QoS %u in PUBLISH\n", publishQos);
                     return false;
                 }
-                size_t payloadLen = length - payloadOffset;  // this might change by 2 if we have a QoS 1 or 2 message
-                uint8_t* payload = _buffer + payloadOffset;
-                memmove(topic, topic + 1, topicLen);  // move topic inside buffer 1 byte to front
-                topic[topicLen] = '\0';               // end the topic as a 'C' string with \x00
+                const size_t payloadLen = length - payloadOffset;  // this might change by 2 if we have a QoS 1 or 2 message
+                uint8_t* const payload = _buffer + payloadOffset;
+                memmove(topic, topic + 1, topicLen);  // move topic inside buffer 1 byte to front to get space for null termination
+                topic[topicLen] = '\0';               // end the topic as a 'C' string with null termination
 
                 _rxFlags = (_buffer[0] & 0x0F) | MQTT_RX_BUSY;  // note: _buffer[0] is overwritten by the PUBACK/PUBREC below
 
@@ -418,19 +449,19 @@ bool PubSubClient::handlePacket(uint8_t hdrLen, size_t length) {
                     _rxFlags = 0;
                 } else {
                     // For QOS 1 and 2 we have a msgId (packet identifier) after the topic at the current payloadOffset
-                    if (payloadLen < 2) {  // payload must be >= 2, as we have the msgId before
-                        ERROR_PSC_PRINTF_P("handlePacket(): Missing msgId in QoS 1/2 message\n");
+                    if (payloadLen < 2) {  // payload must be >= 2, as we have the msgId before the actual payload
+                        DEBUG_PSC_PRINTF("handlePacket(): Missing msgId in QoS 1/2 message\n");
                         return false;
                     }
-                    uint16_t msgId = (_buffer[payloadOffset] << 8) + _buffer[payloadOffset + 1];
+                    const uint16_t msgId = (_buffer[payloadOffset] << 8) + _buffer[payloadOffset + 1];
                     callback(topic, payload + 2, payloadLen - 2);  // remove the msgId from the callback payload
                     _rxFlags = 0;
                     // QoS 1: respond with PUBACK
                     // QoS 2: respond with PUBREC (first step of the QoS 2 subscriber handshake)
                     _buffer[0] = (publishQos == MQTT_QOS1) ? MQTTPUBACK : MQTTPUBREC;
                     _buffer[1] = 2;
-                    _buffer[2] = (msgId >> 8);
-                    _buffer[3] = (msgId & 0xFF);
+                    _buffer[2] = (uint8_t)(msgId >> 8);
+                    _buffer[3] = (uint8_t)(msgId & 0xFF);
                     if (_client->write(_buffer, 4) == 4) {
                         _lastOutActivity = millis();
                     }
@@ -866,7 +897,7 @@ bool PubSubClient::subscribeImpl(bool progmem, const char* topic, uint8_t qos) {
     }
     if (connected()) {
         // Leave room in the _buffer for header and variable length field
-        uint16_t length = MQTT_MAX_HEADER_SIZE;
+        size_t length = MQTT_MAX_HEADER_SIZE;
         length = writeNextMsgId(length);  // _buffer size is checked before
         length = writeStringImpl(progmem, topic, length);
         _buffer[length++] = qos;
@@ -892,7 +923,7 @@ bool PubSubClient::unsubscribeImpl(bool progmem, const char* topic) {
         return false;
     }
     if (connected()) {
-        uint16_t length = MQTT_MAX_HEADER_SIZE;
+        size_t length = MQTT_MAX_HEADER_SIZE;
         length = writeNextMsgId(length);  // _buffer size is checked before
         length = writeStringImpl(progmem, topic, length);
         return writeControlPacket(MQTTUNSUBSCRIBE | MQTT_QOS_GET_HDR(MQTT_QOS1), length - MQTT_MAX_HEADER_SIZE);
@@ -946,7 +977,18 @@ PubSubClient& PubSubClient::setStream(Stream& stream) {
 }
 
 bool PubSubClient::setBufferSize(size_t size) {
-    if (size < MQTT_MAX_HEADER_SIZE + 12) {
+    if (_bufferSize == size) return true;  // if size is unchanged, do nothing and return true
+    if (size == 0) {
+        // allow to free the buffer if the size is set to 0, but only if disconnected, otherwise we would free the buffer while it is still in use
+        if (_state != MQTT_CONNECTED) {
+            free(_buffer);
+            _buffer = nullptr;
+            _bufferSize = 0;
+            _bufferWritePos = 0;
+        }
+        return (_bufferSize == 0);
+    }
+    if (size < MQTT_MIN_BUFFER_SIZE) {
         // Too small: connect() writes up to MQTT_MAX_HEADER_SIZE + 12 bytes (protocol name, version,
         // flags and keepalive for MQTT 3.1) and readPacket() up to MQTT_MAX_HEADER_SIZE + 3 bytes
         // into the buffer without further size checks

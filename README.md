@@ -23,7 +23,8 @@ I appreciate every contribution to this library.
 > This repository is a maintained fork of `hmueller01/pubsubclient3`.
 >
 > Upstream compatibility:
-> - based on upstream `v3.3.0`
+> - based on upstream `v3.3.2`
+> - fork versions use the upstream version plus a suffix (e.g. `3.3.2-a`, `3.3.2-b`, ...)
 > - fork-specific patches and fixes may exist
 
 ## Examples
