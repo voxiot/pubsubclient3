@@ -134,8 +134,13 @@
 // Maximum size of fixed header and variable length size header
 #define MQTT_MAX_HEADER_SIZE 5
 // Minimal buffer size that can be handled, used to check if the buffer size is sufficient in setBufferSize().
-// MQTT_MAX_HEADER_SIZE (5) + protocol (9) + flags (1) + keepalive (2) covers a minmal CONNECT message
-#define MQTT_MIN_BUFFER_SIZE (MQTT_MAX_HEADER_SIZE + 9 + 1 + 2)
+// MQTT_MAX_HEADER_SIZE (5) + protocol name and version (9 for MQTT 3.1, 7 for MQTT 3.1.1) + flags (1) + keepalive (2)
+// + client ID length field (2) covers a minimal CONNECT message with an empty client ID
+#if MQTT_VERSION == MQTT_VERSION_3_1
+#define MQTT_MIN_BUFFER_SIZE (MQTT_MAX_HEADER_SIZE + 9 + 1 + 2 + 2)
+#else
+#define MQTT_MIN_BUFFER_SIZE (MQTT_MAX_HEADER_SIZE + 7 + 1 + 2 + 2)
+#endif
 /// \endcond
 
 /// \anchor callback
@@ -423,7 +428,7 @@ class PubSubClient : public Print {
      * When sending or receiving messages, the packet will contain the full topic string,
      * the payload data, and a small number of header bytes.
      * @param size The size, in bytes, for the internal buffer.
-     * Must be at least #MQTT_MAX_HEADER_SIZE + 12 bytes to hold the packet headers.
+     * Must be at least #MQTT_MIN_BUFFER_SIZE bytes to hold a minimal CONNECT packet.
      * @return true If the buffer was resized.
      * false If the buffer could not be resized (out of memory or size too small).
      * @note Changing the buffer size while the client is still connected may result in undefined behavior. It is recommended to change the buffer size
