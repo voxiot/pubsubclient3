@@ -97,6 +97,7 @@
 
 /// \cond
 #define MQTTRETAINED    1        // Retained flag in the header
+#define MQTT_RX_DUP     0x08     // DUP flag in the PUBLISH header
 #define MQTTCONNECT     1 << 4   // Client request to connect to Server
 #define MQTTCONNACK     2 << 4   // Connect Acknowledgment
 #define MQTTPUBLISH     3 << 4   // Publish message
@@ -182,6 +183,7 @@ class PubSubClient : public Print {
     unsigned long _keepAliveMillis{};
     unsigned long _socketTimeoutMillis{};
     uint16_t _nextMsgId{};
+    uint8_t _rxFlags{};  // low nibble of the last received PUBLISH header (retain, QoS, DUP); placed here to use alignment padding
     unsigned long _lastOutActivity{};
     unsigned long _lastInActivity{};
     bool _pingOutstanding{};
@@ -935,6 +937,37 @@ class PubSubClient : public Print {
      * @return See \ref group_state
      */
     int state();
+
+    /**
+     * @brief Returns the QoS of the message currently delivered to the message \ref callback.
+     * @note Only valid inside the callback; outside of it the value is reset to 0.
+     * Not thread-safe: call it only from the context that runs loop(). If the callback itself calls loop(),
+     * the values are overwritten by the next received message and reset to 0 when that nested callback returns,
+     * so read (and copy) them at the start of the callback.
+     * @return The QoS level (0, 1 or 2) of the received message.
+     */
+    inline uint8_t getRxQos() const {
+        return MQTT_HDR_GET_QOS(_rxFlags);
+    }
+
+    /**
+     * @brief Returns whether the message currently delivered to the message \ref callback has the retain flag set.
+     * @note Only valid inside the callback (see getRxQos() for reentrancy and thread-safety notes).
+     * The flag is only set for retained messages sent by the server right after subscribing.
+     * @return true if the message is a retained message.
+     */
+    inline bool getRxRetained() const {
+        return _rxFlags & MQTTRETAINED;
+    }
+
+    /**
+     * @brief Returns whether the message currently delivered to the message \ref callback has the DUP flag set (re-delivery).
+     * @note Only valid inside the callback (see getRxQos() for reentrancy and thread-safety notes).
+     * @return true if the message is a duplicate delivery attempt.
+     */
+    inline bool getRxDup() const {
+        return _rxFlags & MQTT_RX_DUP;
+    }
 };
 
 #endif

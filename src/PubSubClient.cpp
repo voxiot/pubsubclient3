@@ -410,9 +410,12 @@ bool PubSubClient::handlePacket(uint8_t hdrLen, size_t length) {
                 memmove(topic, topic + 1, topicLen);  // move topic inside buffer 1 byte to front
                 topic[topicLen] = '\0';               // end the topic as a 'C' string with \x00
 
+                _rxFlags = _buffer[0] & 0x0F;  // note: _buffer[0] is overwritten by the PUBACK/PUBREC below
+
                 if (publishQos == MQTT_QOS0) {
                     // No msgId for QOS == 0
                     callback(topic, payload, payloadLen);
+                    _rxFlags = 0;
                 } else {
                     // For QOS 1 and 2 we have a msgId (packet identifier) after the topic at the current payloadOffset
                     if (payloadLen < 2) {  // payload must be >= 2, as we have the msgId before
@@ -421,7 +424,7 @@ bool PubSubClient::handlePacket(uint8_t hdrLen, size_t length) {
                     }
                     uint16_t msgId = (_buffer[payloadOffset] << 8) + _buffer[payloadOffset + 1];
                     callback(topic, payload + 2, payloadLen - 2);  // remove the msgId from the callback payload
-
+                    _rxFlags = 0;
                     // QoS 1: respond with PUBACK
                     // QoS 2: respond with PUBREC (first step of the QoS 2 subscriber handshake)
                     _buffer[0] = (publishQos == MQTT_QOS1) ? MQTTPUBACK : MQTTPUBREC;

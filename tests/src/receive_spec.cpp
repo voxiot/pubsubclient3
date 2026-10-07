@@ -29,9 +29,12 @@ int test_resize_buffer();
 int test_receive_oversized_stream_message();
 int test_receive_qos1();
 int test_receive_qos2();
+void flagsCallback(char* topic, uint8_t* payload, size_t plength);
+int test_receive_flags();
 
 void reset_callback() {
-    callback_called = false;
+
+void reset_callback() {
     lastTopic[0] = '\0';
     lastPayload[0] = '\0';
     lastLength = 0;
@@ -382,8 +385,56 @@ int test_receive_qos2() {
     END_IT
 }
 
+PubSubClient* flagsClient = nullptr;
+uint8_t rxQos = 0xFF;
+bool rxRetained = false;
+bool rxDup = false;
+
+void flagsCallback(char* topic, uint8_t* payload, size_t plength) {
+    rxQos = flagsClient->getRxQos();
+    rxRetained = flagsClient->getRxRetained();
+    rxDup = flagsClient->getRxDup();
+}
+
+int test_receive_flags() {
+    IT("exposes QoS, retain and DUP flags of the received message");
+
+    ShimClient shimClient;
+    shimClient.setAllowConnect(true);
+
+    byte connack[] = {0x20, 0x02, 0x00, 0x00};
+    shimClient.respond(connack, 4);
+
+    PubSubClient client(server, 1883, flagsCallback, shimClient);
+    flagsClient = &client;
+    IS_TRUE(client.connect("client_test1"));
+
+    // QoS 0, retained
+    byte pub0[] = {0x31, 0xe, 0x0, 0x5, 0x74, 0x6f, 0x70, 0x69, 0x63, 0x70, 0x61, 0x79, 0x6c, 0x6f, 0x61, 0x64};
+    shimClient.respond(pub0, 16);
+    IS_TRUE(client.loop());
+    IS_TRUE(rxQos == 0);
+    IS_TRUE(rxRetained);
+    IS_FALSE(rxDup);
+
+    // QoS 1, DUP, not retained (0x3A), msgId 0x1234
+    byte pub1[] = {0x3A, 0x10, 0x0, 0x5, 0x74, 0x6f, 0x70, 0x69, 0x63, 0x12, 0x34, 0x70, 0x61, 0x79, 0x6c, 0x6f, 0x61, 0x64};
+    shimClient.respond(pub1, 18);
+    byte puback[] = {0x40, 0x02, 0x12, 0x34};
+    shimClient.expect(puback, 4);
+    IS_TRUE(client.loop());
+    IS_TRUE(rxQos == 1);
+    IS_FALSE(rxRetained);
+    IS_TRUE(rxDup);
+
+    IS_FALSE(shimClient.error());
+
+    END_IT
+}
+
 int main() {
     SUITE("Receive");
+    test_receive_flags();
     test_receive_callback();
     test_receive_stream();
     test_receive_max_sized_message();
