@@ -410,7 +410,7 @@ bool PubSubClient::handlePacket(uint8_t hdrLen, size_t length) {
                 memmove(topic, topic + 1, topicLen);  // move topic inside buffer 1 byte to front
                 topic[topicLen] = '\0';               // end the topic as a 'C' string with \x00
 
-                _rxFlags = _buffer[0] & 0x0F;  // note: _buffer[0] is overwritten by the PUBACK/PUBREC below
+                _rxFlags = (_buffer[0] & 0x0F) | MQTT_RX_BUSY;  // note: _buffer[0] is overwritten by the PUBACK/PUBREC below
 
                 if (publishQos == MQTT_QOS0) {
                     // No msgId for QOS == 0
@@ -500,6 +500,11 @@ bool PubSubClient::handlePacket(uint8_t hdrLen, size_t length) {
 }
 
 bool PubSubClient::loop() {
+    if (_rxFlags & MQTT_RX_BUSY) {
+        // loop() called from within the message callback: _buffer still holds the message, so do not touch it
+        ERROR_PSC_PRINTF_P("loop() must not be called from the message callback\n");
+        return true;
+    }
     if (!connected()) {
         return false;
     }

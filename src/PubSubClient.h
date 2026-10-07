@@ -98,6 +98,7 @@
 /// \cond
 #define MQTTRETAINED    1        // Retained flag in the header
 #define MQTT_RX_DUP     0x08     // DUP flag in the PUBLISH header
+#define MQTT_RX_BUSY    0x80     // Set while the message callback is running (loop() reentrancy guard)
 #define MQTTCONNECT     1 << 4   // Client request to connect to Server
 #define MQTTCONNACK     2 << 4   // Connect Acknowledgment
 #define MQTTPUBLISH     3 << 4   // Publish message
@@ -139,6 +140,8 @@
  * @param topic The topic of the message.
  * @param payload The payload of the message.
  * @param plength The length of the payload.
+ * @note topic and payload point into the internal buffer: they are only valid until the callback returns and are
+ * overwritten by any publish() / beginPublish() made inside the callback, so copy them first. loop() calls inside the callback are ignored.
  */
 #if defined(__has_include) && __has_include(<functional>) && !defined(NOFUNCTIONAL)
 #include <functional>
@@ -183,7 +186,7 @@ class PubSubClient : public Print {
     unsigned long _keepAliveMillis{};
     unsigned long _socketTimeoutMillis{};
     uint16_t _nextMsgId{};
-    uint8_t _rxFlags{};  // low nibble of the last received PUBLISH header (retain, QoS, DUP); placed here to use alignment padding
+    uint8_t _rxFlags{};  // PUBLISH header low nibble (retain, QoS, DUP) + MQTT_RX_BUSY while in callback; placed here to use alignment padding
     unsigned long _lastOutActivity{};
     unsigned long _lastInActivity{};
     bool _pingOutstanding{};
@@ -941,9 +944,8 @@ class PubSubClient : public Print {
     /**
      * @brief Returns the QoS of the message currently delivered to the message \ref callback.
      * @note Only valid inside the callback; outside of it the value is reset to 0.
-     * Not thread-safe: call it only from the context that runs loop(). If the callback itself calls loop(),
-     * the values are overwritten by the next received message and reset to 0 when that nested callback returns,
-     * so read (and copy) them at the start of the callback.
+     * Not thread-safe: call it only from the context that runs loop(). Calling loop() from inside the callback is
+     * ignored (it returns true without reading), as it would overwrite the topic and payload buffers.
      * @return The QoS level (0, 1 or 2) of the received message.
      */
     inline uint8_t getRxQos() const {

@@ -31,10 +31,10 @@ int test_receive_qos1();
 int test_receive_qos2();
 void flagsCallback(char* topic, uint8_t* payload, size_t plength);
 int test_receive_flags();
+int test_receive_nested_loop();
 
 void reset_callback() {
-
-void reset_callback() {
+    callback_called = false;
     lastTopic[0] = '\0';
     lastPayload[0] = '\0';
     lastLength = 0;
@@ -398,6 +398,9 @@ void flagsCallback(char* topic, uint8_t* payload, size_t plength) {
 
 int test_receive_flags() {
     IT("exposes QoS, retain and DUP flags of the received message");
+    rxQos = 0xFF;
+    rxRetained = false;
+    rxDup = false;
 
     ShimClient shimClient;
     shimClient.setAllowConnect(true);
@@ -416,6 +419,7 @@ int test_receive_flags() {
     IS_TRUE(rxQos == 0);
     IS_TRUE(rxRetained);
     IS_FALSE(rxDup);
+    IS_FALSE(client.getRxRetained());  // reset after callback
 
     // QoS 1, DUP, not retained (0x3A), msgId 0x1234
     byte pub1[] = {0x3A, 0x10, 0x0, 0x5, 0x74, 0x6f, 0x70, 0x69, 0x63, 0x12, 0x34, 0x70, 0x61, 0x79, 0x6c, 0x6f, 0x61, 0x64};
@@ -432,9 +436,56 @@ int test_receive_flags() {
     END_IT
 }
 
+bool nestedLoopResult = false;
+int nestedCalls = 0;
+char nestedTopic[16];
+
+void nestedCallback(char* topic, uint8_t* payload, size_t plength) {
+    nestedCalls++;
+    if (nestedCalls == 1) {
+        nestedLoopResult = flagsClient->loop();  // must be ignored and must not consume the next packet
+        strcpy(nestedTopic, topic);              // topic must still be intact
+    }
+}
+
+int test_receive_nested_loop() {
+    IT("ignores loop() called from inside the callback and resets the flags afterwards");
+    nestedCalls = 0;
+    nestedLoopResult = false;
+    nestedTopic[0] = '\0';
+
+    ShimClient shimClient;
+    shimClient.setAllowConnect(true);
+
+    byte connack[] = {0x20, 0x02, 0x00, 0x00};
+    shimClient.respond(connack, 4);
+
+    PubSubClient client(server, 1883, nestedCallback, shimClient);
+    flagsClient = &client;
+    IS_TRUE(client.connect("client_test1"));
+
+    byte publish[] = {0x31, 0xe, 0x0, 0x5, 0x74, 0x6f, 0x70, 0x69, 0x63, 0x70, 0x61, 0x79, 0x6c, 0x6f, 0x61, 0x64};
+    shimClient.respond(publish, 16);
+    shimClient.respond(publish, 16);
+
+    IS_TRUE(client.loop());
+    IS_TRUE(nestedCalls == 1);
+    IS_TRUE(nestedLoopResult);
+    IS_TRUE(strcmp(nestedTopic, "topic") == 0);
+    IS_TRUE(client.getRxQos() == 0);
+    IS_FALSE(client.getRxRetained());
+
+    // the second packet was not consumed by the nested loop() and is delivered now
+    IS_TRUE(client.loop());
+    IS_TRUE(nestedCalls == 2);
+
+    IS_FALSE(shimClient.error());
+
+    END_IT
+}
+
 int main() {
     SUITE("Receive");
-    test_receive_flags();
     test_receive_callback();
     test_receive_stream();
     test_receive_max_sized_message();
@@ -444,6 +495,8 @@ int main() {
     test_receive_oversized_stream_message();
     test_receive_qos1();
     test_receive_qos2();
+    test_receive_flags();
+    test_receive_nested_loop();
 
     FINISH
 }
