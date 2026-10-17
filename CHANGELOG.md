@@ -7,6 +7,34 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+## [4.0.0] - 2026-10-17
+
+First release of the `voxiot/pubsubclient3` fork, diverging from `hmueller01/pubsubclient3` (based on upstream `v3.3.2`). Focus: robust, watchdog-safe, 24/7 operation on unreliable connectivity. The public API stays backward compatible; all new resilience features are opt-in, except the oversized-packet default which now closes the connection (see `setOversizedPolicy()`).
+
+### Added
+
+- `setMaxIncomingPacket()` / `getMaxIncomingPacket()` to bound the maximum accepted incoming packet size
+- `setPacketTimeout()` / `getPacketTimeout()` to bound the overall packet receive time independently of the per-byte socket timeout
+- Opt-in non-blocking receive: `setRxBufferSize()` / `getRxBufferSize()` allocate a dedicated receive buffer so `loop()` reassembles incoming packets incrementally without ever blocking (default off; classic blocking path unchanged). Works with a Stream too: payload bytes are streamed incrementally
+- `setMaxBytesPerLoop()` / `getMaxBytesPerLoop()` to bound the received bytes processed per `loop()` call, keeping the main loop responsive for offline functionality
+- `setOversizedPolicy()` / `getOversizedPolicy()` to choose how an oversized incoming packet is handled: `MQTT_OVERSIZED_DISCONNECT` (new default, fail-fast reconnect) or `MQTT_OVERSIZED_IGNORE` (classic drop-and-stay-connected)
+- `MQTT_MAX_SANE_PACKET_SIZE`, a platform-aware sane upper bound (ESP8266 16 KiB, ESP32 64 KiB, else protocol max); a packet beyond it is treated as bogus/corrupt and always disconnects regardless of policy
+
+### Fixed
+
+- Handle an oversized incoming packet safely and configurably (see `setOversizedPolicy()`): the new default closes the connection (fail-fast, so the reconnect resynchronises the stream — robust against corruption/desync on unreliable links); the opt-in ignore policy drains (blocking, bounded by the packet deadline + periodic yields, no longer starving the loop/watchdog) or drops it incrementally (non-blocking), keeping the connection; a beyond-sane length always disconnects
+- Add an overall packet read deadline in `readByte()` to defend against slow-drip (slowloris) peers holding `loop()`
+- Yield cooperatively during bulk packet reads to keep feeding the watchdog on ESP32/FreeRTOS
+- Force a clean reconnect when writing a QoS/ping control response (PUBACK/PUBREC/PUBREL/PUBCOMP/PINGRESP) fails
+- Avoid undefined behavior when wrapping `_nextMsgId` (single-expression read/modify)
+- Guard `appendBuffer()` against a missing buffer and `setServer(uint8_t*)` against a null pointer
+- Cap `setBufferSize()` / `setRxBufferSize()` at `MQTT_MAX_POSSIBLE_PACKET_SIZE` to reject nonsensical sizes
+- Fix `-Wsign-conversion` warnings in the topic length, msgId and Stream skip calculations (explicit unsigned shifts)
+
+### Tests
+
+- Add `fragmented_spec` covering non-blocking reassembly byte-by-byte, `setMaxBytesPerLoop()`, incremental oversized discard with resync (ignore policy), a fragmented QoS 1 PUBLISH/PUBACK, fragmented Stream payload delivery, fail-fast disconnect on oversized (default policy), and disconnect on a bogus beyond-sane length
+
 ## [3.3.2] - 2026-09-27
 
 ### Fixed

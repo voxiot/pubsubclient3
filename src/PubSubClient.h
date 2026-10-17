@@ -38,6 +38,34 @@
 #endif
 
 /**
+ * @brief Platform-aware sane upper bound for an incoming packet size, in bytes.
+ * The MQTT protocol maximum (#MQTT_MAX_POSSIBLE_PACKET_SIZE, 256 MB) is far beyond what constrained targets can
+ * ever receive, so it is a poor guard: a corrupted/garbage remaining-length field (e.g. a flipped bit turning a
+ * 20-byte packet into a 200 MB "packet" on a flaky link or a TLS desync) looks valid but indicates a broken
+ * stream. This constant is the threshold above which an oversized packet is treated as bogus and the connection
+ * is always closed (fail-fast reconnect, which is the only way to resynchronise), regardless of the oversized
+ * policy (see setOversizedPolicy()). Tuned per platform; override with -D to fit your product.
+ */
+#ifndef MQTT_MAX_SANE_PACKET_SIZE
+#if defined(ESP8266)
+#define MQTT_MAX_SANE_PACKET_SIZE ((size_t)16384)  // ESP8266: little free heap (shared with WiFi/TLS)
+#elif defined(ESP32) || defined(ARDUINO_ARCH_ESP32)
+#define MQTT_MAX_SANE_PACKET_SIZE ((size_t)65536)  // ESP32 without PSRAM
+#else
+#define MQTT_MAX_SANE_PACKET_SIZE MQTT_MAX_POSSIBLE_PACKET_SIZE  // generic: fall back to the protocol maximum
+#endif
+#endif
+
+/**
+ * @defgroup group_oversized Oversized packet policy
+ * @brief How to handle an incoming packet that does not fit the receive buffer, used by setOversizedPolicy().
+ * @{
+ */
+#define MQTT_OVERSIZED_DISCONNECT ((uint8_t)0)  ///< Default: close the connection (fail-fast). A reconnect resynchronises the stream, which is the robust choice on unreliable links where an oversized length often means corruption/desync.
+#define MQTT_OVERSIZED_IGNORE     ((uint8_t)1)  ///< Drain/drop the packet and keep the connection (the classic behavior). Only applied up to #MQTT_MAX_SANE_PACKET_SIZE; a larger (bogus) packet still disconnects.
+/** @} */
+
+/**
  * @brief Sets the largest packet size, in bytes, the client will handle.
  * Any packet received that exceeds this size will be ignored.
  * This value can be overridden by calling setBufferSize.
@@ -192,8 +220,26 @@ class PubSubClient : public Print {
     uint8_t* _buffer{};
     size_t _bufferSize{};
     size_t _bufferWritePos{};
+    size_t _maxIncomingPacket{};  // max accepted incoming packet size; 0 = limit to _bufferSize (see setMaxIncomingPacket())
+    // Non-blocking receive state (opt-in via setRxBufferSize()). When _rxBuffer is set and no Stream is used,
+    // loop() reassembles incoming packets incrementally into this dedicated buffer across calls, so the main
+    // loop never blocks waiting for bytes. The buffer is dedicated to RX, so outgoing traffic on _buffer
+    // (publish/keepalive) can never corrupt an in-progress reassembly.
+    uint8_t* _rxBuffer{};
+    size_t _rxBufferSize{};
+    size_t _maxBytesPerLoop{};         // max bytes processed per loop() in non-blocking mode; 0 = all available (see setMaxBytesPerLoop())
+    uint8_t _rxState{};                // RxState: current state of the incremental receive FSM
+    uint8_t _rxHdrLen{};               // number of remaining-length bytes of the packet being received
+    uint8_t _oversizedPolicy{};        // MQTT_OVERSIZED_DISCONNECT (default) or MQTT_OVERSIZED_IGNORE (see setOversizedPolicy())
+    uint32_t _rxMultiplier{};          // remaining-length varint multiplier carried across loop() calls
+    size_t _rxLen{};                   // bytes written into _rxBuffer so far
+    size_t _rxLength{};                // decoded remaining length of the packet being received
+    size_t _rxRemaining{};             // payload bytes still to be received
+    size_t _rxStreamSkip{};            // index within the remaining length at which the payload (streamed bytes) begins
+    unsigned long _packetReadStart{};  // millis() when the current packet started, used as overall packet read deadline
     unsigned long _keepAliveMillis{};
     unsigned long _socketTimeoutMillis{};
+    unsigned long _packetTimeoutMillis{};  // overall deadline for a single packet; 0 = fall back to _socketTimeoutMillis (see setPacketTimeout())
     uint16_t _nextMsgId{};
     uint8_t _rxFlags{};  // PUBLISH header low nibble (retain, QoS, DUP) + MQTT_RX_BUSY while in callback; placed here to use alignment padding
     unsigned long _lastOutActivity{};
@@ -206,8 +252,16 @@ class PubSubClient : public Print {
     Stream* _stream{};
     int _state{MQTT_DISCONNECTED};
 
+    // States of the non-blocking incremental receive FSM (see processInbound()).
+    // RX_PAYLOAD stores the packet into _rxBuffer and, when a Stream is set, also writes payload bytes to it.
+    // RX_DISCARD drops the payload of an oversized packet incrementally (no Stream), keeping the connection in
+    // sync (the documented "ignore oversized packet" behavior) without ever blocking the loop.
+    enum RxState : uint8_t { RX_IDLE = 0, RX_HEADER, RX_PAYLOAD, RX_DISCARD };
+
     size_t readPacket(uint8_t* hdrLen);
-    bool handlePacket(uint8_t hdrLen, size_t len);
+    bool handlePacket(uint8_t* buf, size_t bufSize, uint8_t hdrLen, size_t length);
+    bool processInbound();
+    bool dispatchInbound();
     bool readByte(uint8_t* result);
     bool readByte(uint8_t* result, size_t* pos);
     uint8_t buildHeader(uint8_t header, size_t length);
@@ -423,6 +477,24 @@ class PubSubClient : public Print {
     PubSubClient& setSocketTimeout(uint16_t timeout);
 
     /**
+     * @brief Sets the overall deadline for receiving a single MQTT packet.
+     * This is independent of setSocketTimeout(): the socket timeout bounds the wait for an individual byte
+     * (and thus how long a single readPacket()/loop() call may block), while the packet timeout bounds the
+     * time the whole packet may take to arrive. Decoupling them lets you keep a short socket timeout (so the
+     * main loop stays responsive and offline functionality is not frozen) while still accepting a large
+     * message that legitimately takes longer than the socket timeout to be received on a slow link.
+     * @param timeout The packet timeout, in seconds, or 0 to fall back to the socket timeout (the default).
+     * @return The client instance, allowing the function to be chained.
+     */
+    PubSubClient& setPacketTimeout(uint16_t timeout);
+
+    /**
+     * @brief Gets the configured packet timeout.
+     * @return The configured packet timeout in seconds, or 0 if it falls back to the socket timeout.
+     */
+    uint16_t getPacketTimeout();
+
+    /**
      * @brief Sets the size, in bytes, of the internal send and receive buffer.
      * This must be large enough to contain the full MQTT packet.
      * When sending or receiving messages, the packet will contain the full topic string,
@@ -445,6 +517,86 @@ class PubSubClient : public Print {
      * @return The size of the internal buffer.
      */
     size_t getBufferSize();
+
+    /**
+     * @brief Sets the maximum size, in bytes, of an incoming MQTT packet the client will accept.
+     * An incoming packet whose total size exceeds this limit is rejected up front in readPacket() and the
+     * connection is closed, instead of draining (and discarding) up to 256 MB byte-by-byte, which would
+     * starve the main loop and trigger a watchdog reset.
+     * @param size The maximum incoming packet size in bytes, or 0 to limit incoming packets to the current
+     * buffer size (getBufferSize()). The latter is the default and the safe choice when no Stream is set.
+     * @return The client instance, allowing the function to be chained.
+     * @note Only meaningful together with setStream(): without a Stream a packet larger than the buffer can
+     * never be processed anyway, so the effective limit is min(size, bufferSize).
+     */
+    PubSubClient& setMaxIncomingPacket(size_t size);
+
+    /**
+     * @brief Gets the configured maximum incoming packet size.
+     * @return The configured maximum incoming packet size in bytes, or 0 if it tracks the buffer size.
+     */
+    size_t getMaxIncomingPacket();
+
+    /**
+     * @brief Enables non-blocking receive by allocating a dedicated receive buffer, or disables it.
+     * When a receive buffer is set, loop() reassembles incoming packets incrementally into it, consuming only
+     * the bytes already available in the network stack and returning immediately — the main loop never blocks
+     * waiting for bytes, so offline functionality stays responsive even when the broker/connection is slow or
+     * stalls mid-packet. The receive buffer is separate from the send buffer, so an in-progress reassembly can
+     * never be corrupted by an outgoing publish or keepalive.
+     * @param size The receive buffer size in bytes. Must be at least #MQTT_MIN_BUFFER_SIZE and large enough to
+     * hold the largest incoming message to be delivered to the callback (header + topic + payload). 0 frees the
+     * buffer and returns to the classic blocking receive path.
+     * @return true If the buffer was (re)allocated (or freed). false If allocation failed, the size was too
+     * small, or a packet is currently being reassembled (resize/free is refused mid-packet).
+     * @note Opt-in: if never called, the client keeps the classic blocking behavior and allocates no extra RAM.
+     * Allocate once, early (before TLS), to avoid heap fragmentation. On allocation failure the previous state
+     * is kept and the client stays usable (it falls back to the blocking path when no receive buffer exists).
+     * @note Phase 1: the non-blocking path is used only when no Stream is set (see setStream()); with a Stream
+     * the classic blocking path is used.
+     */
+    bool setRxBufferSize(size_t size);
+
+    /**
+     * @brief Gets the current size of the dedicated receive buffer.
+     * @return The size of the receive buffer, or 0 if non-blocking receive is disabled.
+     */
+    size_t getRxBufferSize();
+
+    /**
+     * @brief Sets the maximum number of received bytes processed per loop() call in non-blocking mode.
+     * This bounds how long a single loop() call spends on inbound MQTT traffic, which in turn bounds the
+     * latency of other work done in the same loop (e.g. local/offline control functions). Remaining bytes are
+     * processed on the following loop() calls.
+     * @param maxBytes The per-call byte budget, or 0 to process all currently available bytes (the default).
+     * @return The client instance, allowing the function to be chained.
+     * @note Only effective when non-blocking receive is enabled via setRxBufferSize().
+     */
+    PubSubClient& setMaxBytesPerLoop(size_t maxBytes);
+
+    /**
+     * @brief Gets the configured per-loop received byte budget.
+     * @return The per-loop byte budget, or 0 if all available bytes are processed each call.
+     */
+    size_t getMaxBytesPerLoop();
+
+    /**
+     * @brief Sets how an incoming packet that does not fit the receive buffer is handled.
+     * @param policy #MQTT_OVERSIZED_DISCONNECT (default) to close the connection (fail-fast; a reconnect
+     * resynchronises the stream, the robust choice on unreliable links), or #MQTT_OVERSIZED_IGNORE to drop the
+     * packet and keep the connection (classic behavior). With #MQTT_OVERSIZED_IGNORE, a packet larger than
+     * #MQTT_MAX_SANE_PACKET_SIZE is still treated as bogus and disconnects. Applies to both the blocking and the
+     * non-blocking receive paths. A packet handled via a Stream (setStream()) is not considered oversized unless
+     * it exceeds #MQTT_MAX_SANE_PACKET_SIZE.
+     * @return The client instance, allowing the function to be chained.
+     */
+    PubSubClient& setOversizedPolicy(uint8_t policy);
+
+    /**
+     * @brief Gets the configured oversized-packet policy.
+     * @return #MQTT_OVERSIZED_DISCONNECT or #MQTT_OVERSIZED_IGNORE.
+     */
+    uint8_t getOversizedPolicy();
 
     /**
      * @brief Connects the client using a clean session without username and password.

@@ -5,27 +5,47 @@ a server that supports MQTT.
 
 ## Notes of this fork
 
-This is a fork of the repository [knolleary/pubsubclient v2.8](https://github.com/knolleary/pubsubclient/releases/tag/v2.8), which was last updated in May 20, 2020. There was an update approach in [#1045](https://github.com/knolleary/pubsubclient/issues/1045), but it's also stale.
+This library descends from [knolleary/pubsubclient v2.8](https://github.com/knolleary/pubsubclient/releases/tag/v2.8) and the maintained fork [hmueller01/pubsubclient3](https://github.com/hmueller01/pubsubclient3).
 
-I tried lot's of different other MQTT libs, but they need more resources than PubSubClient or lacking maintenance as well:
-
- - https://github.com/256dpi/arduino-mqtt
- - https://github.com/hideakitai/MQTTPubSubClient
- - https://github.com/bertmelis/espMqttClient
- - https://github.com/arduino-libraries/ArduinoMqttClient
- - https://github.com/thingsboard/pubsubclient
-
-Since there was no progress I decided to merge the most important PRs manually and publish a new major version. I also renamed to PubSubClient3 to have a similar but different name of the library.
-
-I appreciate every contribution to this library.
+Starting with **v4.0.0**, this repository (`voxiot/pubsubclient3`) **diverges** from upstream. It is maintained for the Voxiot product line and focuses on robust, watchdog-safe, 24/7 operation on unreliable connectivity (flaky WiFi, Internet and broker) on resource-constrained targets (ESP8266 / ESP32). The receive path was reworked so that MQTT never freezes the main loop — important when the device must keep running local/offline functions while the broker is slow or unreachable.
 
 > [!IMPORTANT]
-> This repository is a maintained fork of `hmueller01/pubsubclient3`.
+> **Diverged fork.** Based on upstream `hmueller01/pubsubclient3 v3.3.2`, independently versioned from **v4.0.0** onward.
 >
-> Upstream compatibility:
-> - based on upstream `v3.3.2`
-> - fork versions use the upstream version plus a suffix (e.g. `3.3.2-a`, `3.3.2-b`, ...)
-> - fork-specific patches and fixes may exist
+> We no longer track upstream version-for-version. Upstream changes are reviewed individually and cherry-picked only when they make sense for this fork. The public API remains backward compatible: all v4 resilience features are **opt-in** and default to the classic behavior, except the oversized-packet default (see below).
+
+## Resilience and non-blocking operation (v4)
+
+All features below are additive. If you change nothing, the library behaves as before — except that an oversized incoming packet now disconnects by default (see `setOversizedPolicy`).
+
+- **Non-blocking receive (opt-in).** By default the receive path is synchronous: a single `loop()` call can block while a packet is being read. For firmware that must stay responsive (e.g. a button that opens a gate from local memory while the broker is down), enable incremental receive with a dedicated buffer:
+
+  ```c
+  client.setRxBufferSize(512);     // dedicated RX buffer; enables non-blocking receive
+  client.setMaxBytesPerLoop(256);  // optional: cap bytes processed per loop() to bound latency
+  ```
+
+  `loop()` then consumes only the bytes already available and returns, reassembling packets across calls. The RX buffer is separate from the send buffer, so an in-progress receive is never corrupted by an outgoing publish or keepalive. Allocate it once, early (before TLS), to avoid heap fragmentation; on allocation failure the client keeps working on the classic blocking path. Works with `setStream()` too (payload is streamed incrementally).
+
+- **Packet read deadline, decoupled from the socket timeout.** `setSocketTimeout()` bounds how long the client waits for a single byte; `setPacketTimeout()` bounds the time a whole packet may take to arrive. Keeping a short socket timeout keeps the loop responsive, while a separate packet timeout still allows a large message to arrive on a slow link. A partially received packet that stalls is aborted (never blocks).
+
+  ```c
+  client.setSocketTimeout(2);   // short: bounds per-byte wait / loop responsiveness
+  client.setPacketTimeout(10);  // 0 (default) = fall back to the socket timeout
+  ```
+
+- **Oversized-packet policy.** When an incoming packet does not fit the buffer:
+
+  ```c
+  client.setOversizedPolicy(MQTT_OVERSIZED_DISCONNECT); // default (v4): fail-fast, reconnect resynchronises
+  client.setOversizedPolicy(MQTT_OVERSIZED_IGNORE);     // classic: drop the packet, keep the connection
+  ```
+
+  On unreliable links an oversized remaining-length is more often corruption/desync than a genuinely large message, and only a reconnect can resynchronise a broken stream — hence the fail-fast default. A packet larger than `MQTT_MAX_SANE_PACKET_SIZE` (platform-aware: 16 KiB on ESP8266, 64 KiB on ESP32, protocol max otherwise; override with `-D`) is always treated as bogus and disconnects, regardless of policy.
+
+- **Received-message metadata.** Inside the callback, `getRxQos()`, `getRxRetained()` and `getRxDup()` expose the QoS, retain and DUP flags of the current message.
+
+See [CHANGELOG.md](CHANGELOG.md) for the full list of v4 changes and fixes.
 
 ## Examples
 
@@ -47,7 +67,9 @@ Full API documentation is available here: https://hmueller01.github.io/pubsubcli
  - It can subscribe at QoS 0 or QoS 1.
  - The maximum message size, including header, is **256 bytes** by default. This
    is configurable via `MQTT_MAX_PACKET_SIZE` in `PubSubClient.h` or can be changed
-   by calling `PubSubClient::setBufferSize(size)`.
+   by calling `PubSubClient::setBufferSize(size)`. An incoming packet larger than the
+   buffer is, by default (v4), handled by closing the connection (see
+   `setOversizedPolicy()` to restore the classic ignore-and-stay-connected behavior).
  - The keepalive interval is set to 15 seconds by default. This is configurable
    via `MQTT_KEEPALIVE` in `PubSubClient.h` or can be changed by calling
    `PubSubClient::setKeepAlive(keepAlive)`.
