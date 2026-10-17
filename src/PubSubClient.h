@@ -38,6 +38,34 @@
 #endif
 
 /**
+ * @brief Platform-aware sane upper bound for an incoming packet size, in bytes.
+ * The MQTT protocol maximum (#MQTT_MAX_POSSIBLE_PACKET_SIZE, 256 MB) is far beyond what constrained targets can
+ * ever receive, so it is a poor guard: a corrupted/garbage remaining-length field (e.g. a flipped bit turning a
+ * 20-byte packet into a 200 MB "packet" on a flaky link or a TLS desync) looks valid but indicates a broken
+ * stream. This constant is the threshold above which an oversized packet is treated as bogus and the connection
+ * is always closed (fail-fast reconnect, which is the only way to resynchronise), regardless of the oversized
+ * policy (see setOversizedPolicy()). Tuned per platform; override with -D to fit your product.
+ */
+#ifndef MQTT_MAX_SANE_PACKET_SIZE
+#if defined(ESP8266)
+#define MQTT_MAX_SANE_PACKET_SIZE ((size_t)16384)  // ESP8266: little free heap (shared with WiFi/TLS)
+#elif defined(ESP32) || defined(ARDUINO_ARCH_ESP32)
+#define MQTT_MAX_SANE_PACKET_SIZE ((size_t)65536)  // ESP32 without PSRAM
+#else
+#define MQTT_MAX_SANE_PACKET_SIZE MQTT_MAX_POSSIBLE_PACKET_SIZE  // generic: fall back to the protocol maximum
+#endif
+#endif
+
+/**
+ * @defgroup group_oversized Oversized packet policy
+ * @brief How to handle an incoming packet that does not fit the receive buffer, used by setOversizedPolicy().
+ * @{
+ */
+#define MQTT_OVERSIZED_DISCONNECT ((uint8_t)0)  ///< Default: close the connection (fail-fast). A reconnect resynchronises the stream, which is the robust choice on unreliable links where an oversized length often means corruption/desync.
+#define MQTT_OVERSIZED_IGNORE     ((uint8_t)1)  ///< Drain/drop the packet and keep the connection (the classic behavior). Only applied up to #MQTT_MAX_SANE_PACKET_SIZE; a larger (bogus) packet still disconnects.
+/** @} */
+
+/**
  * @brief Sets the largest packet size, in bytes, the client will handle.
  * Any packet received that exceeds this size will be ignored.
  * This value can be overridden by calling setBufferSize.
@@ -200,8 +228,9 @@ class PubSubClient : public Print {
     uint8_t* _rxBuffer{};
     size_t _rxBufferSize{};
     size_t _maxBytesPerLoop{};  // max bytes processed per loop() in non-blocking mode; 0 = all available (see setMaxBytesPerLoop())
-    uint8_t _rxState{};         // RxState: current state of the incremental receive FSM
-    uint8_t _rxHdrLen{};        // number of remaining-length bytes of the packet being received
+    uint8_t _rxState{};          // RxState: current state of the incremental receive FSM
+    uint8_t _rxHdrLen{};         // number of remaining-length bytes of the packet being received
+    uint8_t _oversizedPolicy{};  // MQTT_OVERSIZED_DISCONNECT (default) or MQTT_OVERSIZED_IGNORE (see setOversizedPolicy())
     uint32_t _rxMultiplier{};   // remaining-length varint multiplier carried across loop() calls
     size_t _rxLen{};            // bytes written into _rxBuffer so far
     size_t _rxLength{};         // decoded remaining length of the packet being received
@@ -550,6 +579,24 @@ class PubSubClient : public Print {
      * @return The per-loop byte budget, or 0 if all available bytes are processed each call.
      */
     size_t getMaxBytesPerLoop();
+
+    /**
+     * @brief Sets how an incoming packet that does not fit the receive buffer is handled.
+     * @param policy #MQTT_OVERSIZED_DISCONNECT (default) to close the connection (fail-fast; a reconnect
+     * resynchronises the stream, the robust choice on unreliable links), or #MQTT_OVERSIZED_IGNORE to drop the
+     * packet and keep the connection (classic behavior). With #MQTT_OVERSIZED_IGNORE, a packet larger than
+     * #MQTT_MAX_SANE_PACKET_SIZE is still treated as bogus and disconnects. Applies to both the blocking and the
+     * non-blocking receive paths. A packet handled via a Stream (setStream()) is not considered oversized unless
+     * it exceeds #MQTT_MAX_SANE_PACKET_SIZE.
+     * @return The client instance, allowing the function to be chained.
+     */
+    PubSubClient& setOversizedPolicy(uint8_t policy);
+
+    /**
+     * @brief Gets the configured oversized-packet policy.
+     * @return #MQTT_OVERSIZED_DISCONNECT or #MQTT_OVERSIZED_IGNORE.
+     */
+    uint8_t getOversizedPolicy();
 
     /**
      * @brief Connects the client using a clean session without username and password.

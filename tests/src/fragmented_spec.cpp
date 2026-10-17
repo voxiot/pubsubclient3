@@ -24,6 +24,8 @@ static int test_max_bytes_per_loop();
 static int test_fragmented_oversized_discard();
 static int test_fragmented_qos1();
 static int test_fragmented_stream();
+static int test_oversized_disconnect_default();
+static int test_bogus_length_disconnect();
 
 static void reset_callback() {
     callback_called = false;
@@ -104,12 +106,13 @@ static int test_max_bytes_per_loop() {
 }
 
 static int test_fragmented_oversized_discard() {
-    IT("drops an oversized packet incrementally and stays in sync");
+    IT("drops an oversized packet incrementally and stays in sync (ignore policy)");
     reset_callback();
 
     ShimClient shimClient;
     PubSubClient client(server, 1883, callback, shimClient);
     IS_TRUE(setup_connected(shimClient, client, 20));  // small RX buffer
+    client.setOversizedPolicy(MQTT_OVERSIZED_IGNORE);
 
     // Oversized PUBLISH: remaining length 2 + 5 + 16 = 23 (0x17), total 25 > 20 -> must be ignored
     byte big[25];
@@ -202,6 +205,66 @@ static int test_fragmented_stream() {
     END_IT
 }
 
+static int test_oversized_disconnect_default() {
+    IT("disconnects on an oversized packet by default (fail-fast)");
+    reset_callback();
+
+    ShimClient shimClient;
+    PubSubClient client(server, 1883, callback, shimClient);
+    IS_TRUE(setup_connected(shimClient, client, 20));  // default policy = MQTT_OVERSIZED_DISCONNECT
+    IS_TRUE(client.getOversizedPolicy() == MQTT_OVERSIZED_DISCONNECT);
+
+    // Oversized PUBLISH: remaining length 23 (0x17), total 25 > 20
+    byte big[25];
+    big[0] = 0x30;
+    big[1] = 0x17;
+    big[2] = 0x00;
+    big[3] = 0x05;
+    memcpy(&big[4], "topic", 5);
+    memset(&big[9], 'A', 16);
+
+    bool disconnected = false;
+    for (size_t i = 0; i < sizeof(big); i++) {
+        shimClient.respond(&big[i], 1);
+        if (!client.loop()) {
+            disconnected = true;  // fail-fast closed the connection once the oversized length was known
+            break;
+        }
+    }
+    IS_TRUE(disconnected);
+    IS_FALSE(callback_called);
+    IS_FALSE(client.connected());
+
+    END_IT
+}
+
+static int test_bogus_length_disconnect() {
+    IT("disconnects on a bogus (beyond-sane) length even with ignore policy");
+    reset_callback();
+
+    ShimClient shimClient;
+    PubSubClient client(server, 1883, callback, shimClient);
+    IS_TRUE(setup_connected(shimClient, client, 64));
+    client.setOversizedPolicy(MQTT_OVERSIZED_IGNORE);
+
+    // Remaining length encoded as the protocol maximum (0xFF,0xFF,0xFF,0x7F = 268435455): total exceeds
+    // MQTT_MAX_SANE_PACKET_SIZE, so it is treated as bogus/corrupt and disconnects regardless of the policy.
+    byte header[] = {0x30, 0xFF, 0xFF, 0xFF, 0x7F};
+    bool disconnected = false;
+    for (size_t i = 0; i < sizeof(header); i++) {
+        shimClient.respond(&header[i], 1);
+        if (!client.loop()) {
+            disconnected = true;
+            break;
+        }
+    }
+    IS_TRUE(disconnected);
+    IS_FALSE(callback_called);
+    IS_FALSE(client.connected());
+
+    END_IT
+}
+
 int main() {
     SUITE("Fragmented (non-blocking receive)");
     test_fragmented_receive();
@@ -209,6 +272,8 @@ int main() {
     test_fragmented_oversized_discard();
     test_fragmented_qos1();
     test_fragmented_stream();
+    test_oversized_disconnect_default();
+    test_bogus_length_disconnect();
 
     FINISH
 }

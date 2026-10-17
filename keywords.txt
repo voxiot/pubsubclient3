@@ -42,6 +42,10 @@ setRxBufferSize 	KEYWORD2
 getRxBufferSize 	KEYWORD2
 setMaxBytesPerLoop 	KEYWORD2
 getMaxBytesPerLoop 	KEYWORD2
+setOversizedPolicy 	KEYWORD2
+getOversizedPolicy 	KEYWORD2
+MQTT_OVERSIZED_DISCONNECT 	LITERAL1
+MQTT_OVERSIZED_IGNORE 	LITERAL1
 
 #######################################
 # Constants (LITERAL1)

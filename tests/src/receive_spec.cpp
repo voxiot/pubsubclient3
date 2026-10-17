@@ -163,6 +163,7 @@ int test_receive_oversized_message() {
 
     PubSubClient client(server, 1883, callback, shimClient);
     IS_TRUE(client.setBufferSize(PUBLISH_LEN - 1));
+    client.setOversizedPolicy(MQTT_OVERSIZED_IGNORE);  // test the classic ignore-and-stay-connected behavior
     bool rc = client.connect("client_test1");
     IS_TRUE(rc);
 
@@ -254,6 +255,7 @@ int test_resize_buffer2() {
 
     PubSubClient client(server, 1883, callback, shimClient);
     IS_TRUE(client.setBufferSize(PUBLISH_LEN - 1));
+    client.setOversizedPolicy(MQTT_OVERSIZED_IGNORE);  // test the classic ignore-and-stay-connected behavior
     IS_TRUE(client.connect("client_test1"));
 
     byte publish[] = {0x30, PUBLISH_LEN - 2, 0x0, 0x5, 0x74, 0x6f, 0x70, 0x69, 0x63, 0x70, 0x61, 0x79, 0x6c, 0x6f, 0x61, 0x64};

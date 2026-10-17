@@ -13,10 +13,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - `setPacketTimeout()` / `getPacketTimeout()` to bound the overall packet receive time independently of the per-byte socket timeout
 - Opt-in non-blocking receive: `setRxBufferSize()` / `getRxBufferSize()` allocate a dedicated receive buffer so `loop()` reassembles incoming packets incrementally without ever blocking (default off; classic blocking path unchanged). Works with a Stream too: payload bytes are streamed incrementally
 - `setMaxBytesPerLoop()` / `getMaxBytesPerLoop()` to bound the received bytes processed per `loop()` call, keeping the main loop responsive for offline functionality
+- `setOversizedPolicy()` / `getOversizedPolicy()` to choose how an oversized incoming packet is handled: `MQTT_OVERSIZED_DISCONNECT` (new default, fail-fast reconnect) or `MQTT_OVERSIZED_IGNORE` (classic drop-and-stay-connected)
+- `MQTT_MAX_SANE_PACKET_SIZE`, a platform-aware sane upper bound (ESP8266 16 KiB, ESP32 64 KiB, else protocol max); a packet beyond it is treated as bogus/corrupt and always disconnects regardless of policy
 
 ### Fixed
 
-- Bound the receive of an oversized packet: the classic blocking path still drains and ignores it (keeping the connection in sync as documented), but the drain is now bounded by the packet read deadline and yields periodically, so it can no longer starve the loop or trip the watchdog; the non-blocking path drops it incrementally without blocking or disconnecting
+- Handle an oversized incoming packet safely and configurably (see `setOversizedPolicy()`): the new default closes the connection (fail-fast, so the reconnect resynchronises the stream — robust against corruption/desync on unreliable links); the opt-in ignore policy drains (blocking, bounded by the packet deadline + periodic yields, no longer starving the loop/watchdog) or drops it incrementally (non-blocking), keeping the connection; a beyond-sane length always disconnects
 - Add an overall packet read deadline in `readByte()` to defend against slow-drip (slowloris) peers holding `loop()`
 - Yield cooperatively during bulk packet reads to keep feeding the watchdog on ESP32/FreeRTOS
 - Force a clean reconnect when writing a QoS/ping control response (PUBACK/PUBREC/PUBREL/PUBCOMP/PINGRESP) fails
@@ -27,7 +29,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Tests
 
-- Add `fragmented_spec` covering non-blocking reassembly byte-by-byte, `setMaxBytesPerLoop()`, incremental oversized discard with resync, a fragmented QoS 1 PUBLISH/PUBACK, and fragmented Stream payload delivery
+- Add `fragmented_spec` covering non-blocking reassembly byte-by-byte, `setMaxBytesPerLoop()`, incremental oversized discard with resync (ignore policy), a fragmented QoS 1 PUBLISH/PUBACK, fragmented Stream payload delivery, fail-fast disconnect on oversized (default policy), and disconnect on a bogus beyond-sane length
 
 ## [3.3.2] - 2026-09-27
 

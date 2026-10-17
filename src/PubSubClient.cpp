@@ -365,11 +365,35 @@ size_t PubSubClient::readPacket(uint8_t* hdrLen) {
 
     DEBUG_PSC_PRINTF("readPacket received packet of length %zu (isPublish = %u)\n", length, isPublish);
 
-    // Note: an oversized packet (larger than the buffer, no Stream) is drained and ignored below (see the
-    // idx > _bufferSize check after the read loop), keeping the connection in sync as documented. The drain
-    // is bounded in time by the packet read deadline (setPacketTimeout()) and yields periodically, so it can
-    // no longer starve the loop or trip the watchdog as the unbounded byte-by-byte drain used to. For a
-    // freeze-free path on large/oversized messages, use the non-blocking receive (setRxBufferSize()).
+    // Oversized-packet handling (see setOversizedPolicy()). A length beyond MQTT_MAX_SANE_PACKET_SIZE is treated
+    // as bogus (corruption/desync on a flaky link) and always disconnects, so the reconnect can resynchronise.
+    {
+        const size_t totalLen = (size_t)*hdrLen + 1 + length;  // type byte + remaining-length bytes + remaining length
+        if (!_stream) {
+            size_t budget = _bufferSize;
+            if (_maxIncomingPacket && (_maxIncomingPacket < budget)) budget = _maxIncomingPacket;
+            if (totalLen > budget) {
+                if ((_oversizedPolicy == MQTT_OVERSIZED_IGNORE) && (totalLen <= MQTT_MAX_SANE_PACKET_SIZE)) {
+                    // Drain-and-ignore: fall through. The read loop (bounded by the packet deadline and periodic
+                    // yields) consumes all bytes and the idx > _bufferSize check below drops the packet, keeping
+                    // the stream in sync without blocking indefinitely or tripping the watchdog.
+                    DEBUG_PSC_PRINTF("readPacket draining oversized packet (%zu > budget %zu)\n", totalLen, budget);
+                } else {
+                    // Fail-fast: close the connection so the reconnect resynchronises the stream.
+                    ERROR_PSC_PRINTF_P("readPacket disconnecting on oversized packet (%zu > budget %zu)\n", totalLen, budget);
+                    _state = MQTT_DISCONNECTED;
+                    _client->stop();
+                    return 0;
+                }
+            }
+        } else if (totalLen > MQTT_MAX_SANE_PACKET_SIZE) {
+            // Stream mode: payload overflow is streamed out, so only a bogus (beyond-sane) length disconnects.
+            ERROR_PSC_PRINTF_P("readPacket disconnecting on bogus streamed packet (%zu)\n", totalLen);
+            _state = MQTT_DISCONNECTED;
+            _client->stop();
+            return 0;
+        }
+    }
 
     if (isPublish) {
         if (length < 2) {
@@ -693,21 +717,37 @@ bool PubSubClient::processInbound() {
                         break;
                     }
                     _rxRemaining = _rxLength;
-                    if (_stream) {
-                        // With a Stream, payload bytes that do not fit the buffer are written to the Stream,
-                        // so an oversized packet is not rejected here (see RX_PAYLOAD).
-                        _rxState = RX_PAYLOAD;
-                    } else {
-                        size_t budgetSize = _rxBufferSize;
-                        if (_maxIncomingPacket && (_maxIncomingPacket < budgetSize)) budgetSize = _maxIncomingPacket;
+                    {
                         const size_t totalLen = (size_t)_rxHdrLen + 1 + _rxLength;  // type + remaining-length bytes + remaining length
-                        if (totalLen > budgetSize) {
-                            // Oversized: drop the payload incrementally and keep the connection in sync (the
-                            // documented "ignore oversized packet" behavior), without blocking or disconnecting.
-                            ERROR_PSC_PRINTF_P("processInbound ignoring oversized packet (%zu > budget %zu)\n", totalLen, budgetSize);
-                            _rxState = RX_DISCARD;
-                        } else {
+                        if (_stream) {
+                            // With a Stream, payload overflow is written to the Stream; only a bogus length disconnects.
+                            if (totalLen > MQTT_MAX_SANE_PACKET_SIZE) {
+                                ERROR_PSC_PRINTF_P("processInbound disconnecting on bogus streamed packet (%zu)\n", totalLen);
+                                _rxState = RX_IDLE;
+                                _state = MQTT_DISCONNECTED;
+                                _client->stop();
+                                return false;
+                            }
                             _rxState = RX_PAYLOAD;
+                        } else {
+                            size_t budgetSize = _rxBufferSize;
+                            if (_maxIncomingPacket && (_maxIncomingPacket < budgetSize)) budgetSize = _maxIncomingPacket;
+                            if (totalLen > budgetSize) {
+                                if ((_oversizedPolicy == MQTT_OVERSIZED_IGNORE) && (totalLen <= MQTT_MAX_SANE_PACKET_SIZE)) {
+                                    // Drop the payload incrementally and keep the connection in sync, without blocking.
+                                    ERROR_PSC_PRINTF_P("processInbound ignoring oversized packet (%zu > budget %zu)\n", totalLen, budgetSize);
+                                    _rxState = RX_DISCARD;
+                                } else {
+                                    // Fail-fast: close so the reconnect resynchronises the stream.
+                                    ERROR_PSC_PRINTF_P("processInbound disconnecting on oversized packet (%zu > budget %zu)\n", totalLen, budgetSize);
+                                    _rxState = RX_IDLE;
+                                    _state = MQTT_DISCONNECTED;
+                                    _client->stop();
+                                    return false;
+                                }
+                            } else {
+                                _rxState = RX_PAYLOAD;
+                            }
                         }
                     }
                 } else if (_rxLen == MQTT_MAX_HEADER_SIZE) {
@@ -1264,6 +1304,15 @@ PubSubClient& PubSubClient::setMaxBytesPerLoop(size_t maxBytes) {
 
 size_t PubSubClient::getMaxBytesPerLoop() {
     return _maxBytesPerLoop;
+}
+
+PubSubClient& PubSubClient::setOversizedPolicy(uint8_t policy) {
+    _oversizedPolicy = (policy == MQTT_OVERSIZED_IGNORE) ? MQTT_OVERSIZED_IGNORE : MQTT_OVERSIZED_DISCONNECT;
+    return *this;
+}
+
+uint8_t PubSubClient::getOversizedPolicy() {
+    return _oversizedPolicy;
 }
 
 PubSubClient& PubSubClient::setKeepAlive(uint16_t keepAlive) {
