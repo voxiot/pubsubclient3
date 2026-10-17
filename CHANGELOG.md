@@ -7,6 +7,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+## [4.0.0] - 2026-10-17
+
+First release of the `voxiot/pubsubclient3` fork, diverging from `hmueller01/pubsubclient3` (based on upstream `v3.3.2`). Focus: robust, watchdog-safe, 24/7 operation on unreliable connectivity. The public API stays backward compatible; all new resilience features are opt-in, except the oversized-packet default which now closes the connection (see `setOversizedPolicy()`).
+
 ### Added
 
 - `setMaxIncomingPacket()` / `getMaxIncomingPacket()` to bound the maximum accepted incoming packet size
