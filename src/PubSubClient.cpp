@@ -138,6 +138,7 @@ PubSubClient::PubSubClient(const char* domain, uint16_t port, MQTT_CALLBACK_SIGN
 PubSubClient::~PubSubClient() {
     free(_domain);
     free(_buffer);
+    free(_rxBuffer);
 }
 
 bool PubSubClient::connect(const char* id, const char* user, const char* pass, const char* willTopic, uint8_t willQos, bool willRetain,
@@ -432,16 +433,18 @@ size_t PubSubClient::readPacket(uint8_t* hdrLen) {
 /**
  * @brief  After a packet is read handle the content here (call the callback, handle pings).
  *
+ * @param  buf Buffer holding the received packet (the shared _buffer in blocking mode, or the dedicated _rxBuffer in non-blocking mode).
+ * @param  bufSize Size of buf in bytes.
  * @param  hdrLen Variable header length send by MQTT broker (1 .. MQTT_MAX_HEADER_SIZE - 1).
- * @param  length Number of read bytes in _buffer.
+ * @param  length Number of read bytes in buf.
  * @return true if packet was successfully processed, false if a buffer over or underflow occurred.
  */
-bool PubSubClient::handlePacket(uint8_t hdrLen, size_t length) {
-    uint8_t type = _buffer[0] & 0xF0;
+bool PubSubClient::handlePacket(uint8_t* buf, size_t bufSize, uint8_t hdrLen, size_t length) {
+    uint8_t type = buf[0] & 0xF0;
     DEBUG_PSC_PRINTF("handlePacket(): received message of type %u\n", type);
-    if (length > _bufferSize) {
-        // This should never happen as readPacket() prevents buffer overflow, but we check again here to be sure and prevent any buffer overflows.
-        DEBUG_PSC_PRINTF("handlePacket(): packet length %zu exceeds buffer size %zu\n", length, _bufferSize);
+    if (length > bufSize) {
+        // This should never happen as the receive path prevents buffer overflow, but we check again here to be sure and prevent any buffer overflows.
+        DEBUG_PSC_PRINTF("handlePacket(): packet length %zu exceeds buffer size %zu\n", length, bufSize);
         return false;
     }
     switch (type) {
@@ -461,9 +464,9 @@ bool PubSubClient::handlePacket(uint8_t hdrLen, size_t length) {
                     DEBUG_PSC_PRINTF("handlePacket(): Packet too short to contain topic length field\n");
                     return false;
                 }
-                const uint16_t topicLen = (_buffer[hdrLen + 1] << 8) + _buffer[hdrLen + 2];  // topic length in bytes
-                char* topic = (char*)(_buffer + hdrLen + 3 - 1);  // set the topic in the LSB of the topic lenght, as we move it there later
-                const uint8_t publishQos = MQTT_HDR_GET_QOS(_buffer[0]);  // save QoS before _buffer[0] is overwritten
+                const uint16_t topicLen = (buf[hdrLen + 1] << 8) + buf[hdrLen + 2];  // topic length in bytes
+                char* topic = (char*)(buf + hdrLen + 3 - 1);  // set the topic in the LSB of the topic lenght, as we move it there later
+                const uint8_t publishQos = MQTT_HDR_GET_QOS(buf[0]);  // save QoS before buf[0] is overwritten
 
                 // Guard 2: ensure topic fits in buffer. Compare topicLen against the remaining length instead of
                 // adding it first, as hdrLen + 3 + topicLen can wrap around if size_t is 16-bit (e.g. AVR).
@@ -478,11 +481,11 @@ bool PubSubClient::handlePacket(uint8_t hdrLen, size_t length) {
                     return false;
                 }
                 const size_t payloadLen = length - payloadOffset;  // this might change by 2 if we have a QoS 1 or 2 message
-                uint8_t* const payload = _buffer + payloadOffset;
+                uint8_t* const payload = buf + payloadOffset;
                 memmove(topic, topic + 1, topicLen);  // move topic inside buffer 1 byte to front to get space for null termination
                 topic[topicLen] = '\0';               // end the topic as a 'C' string with null termination
 
-                _rxFlags = (_buffer[0] & 0x0F) | MQTT_RX_BUSY;  // note: _buffer[0] is overwritten by the PUBACK/PUBREC below
+                _rxFlags = (buf[0] & 0x0F) | MQTT_RX_BUSY;  // note: buf[0] is overwritten by the PUBACK/PUBREC below
 
                 if (publishQos == MQTT_QOS0) {
                     // No msgId for QOS == 0
@@ -494,16 +497,16 @@ bool PubSubClient::handlePacket(uint8_t hdrLen, size_t length) {
                         DEBUG_PSC_PRINTF("handlePacket(): Missing msgId in QoS 1/2 message\n");
                         return false;
                     }
-                    const uint16_t msgId = (_buffer[payloadOffset] << 8) + _buffer[payloadOffset + 1];
+                    const uint16_t msgId = (buf[payloadOffset] << 8) + buf[payloadOffset + 1];
                     callback(topic, payload + 2, payloadLen - 2);  // remove the msgId from the callback payload
                     _rxFlags = 0;
                     // QoS 1: respond with PUBACK
                     // QoS 2: respond with PUBREC (first step of the QoS 2 subscriber handshake)
-                    _buffer[0] = (publishQos == MQTT_QOS1) ? MQTTPUBACK : MQTTPUBREC;
-                    _buffer[1] = 2;
-                    _buffer[2] = (uint8_t)(msgId >> 8);
-                    _buffer[3] = (uint8_t)(msgId & 0xFF);
-                    if (_client->write(_buffer, 4) != 4) {
+                    buf[0] = (publishQos == MQTT_QOS1) ? MQTTPUBACK : MQTTPUBREC;
+                    buf[1] = 2;
+                    buf[2] = (uint8_t)(msgId >> 8);
+                    buf[3] = (uint8_t)(msgId & 0xFF);
+                    if (_client->write(buf, 4) != 4) {
                         // socket write failed: the QoS handshake is broken, force a clean reconnect
                         ERROR_PSC_PRINTF_P("handlePacket(): failed to write PUBACK/PUBREC\n");
                         return false;
@@ -528,9 +531,9 @@ bool PubSubClient::handlePacket(uint8_t hdrLen, size_t length) {
                 return false;
             }
             // MQTT Publish Release (QoS 2 publisher handshake, part 2): See section 3.6 MQTT v3.1.1 protocol specification
-            _buffer[0] = MQTTPUBREL | 2;  // PUBREL fixed header: bit 1 must be set per spec
+            buf[0] = MQTTPUBREL | 2;  // PUBREL fixed header: bit 1 must be set per spec
             // bytes 1-3 of PUBREL are the same as of PUBREC (remaining length + msgId)
-            if (_client->write(_buffer, 4) != 4) {
+            if (_client->write(buf, 4) != 4) {
                 ERROR_PSC_PRINTF_P("handlePacket(): failed to write PUBREL\n");
                 return false;
             }
@@ -544,9 +547,9 @@ bool PubSubClient::handlePacket(uint8_t hdrLen, size_t length) {
                 return false;
             }
             // MQTT Publish Complete (QoS 2 subscriber handshake, part 3): See section 3.7 MQTT v3.1.1 protocol specification
-            _buffer[0] = MQTTPUBCOMP;
+            buf[0] = MQTTPUBCOMP;
             // bytes 1-3 of PUBCOMP are the same as of PUBREL (remaining length + msgId)
-            if (_client->write(_buffer, 4) != 4) {
+            if (_client->write(buf, 4) != 4) {
                 ERROR_PSC_PRINTF_P("handlePacket(): failed to write PUBCOMP\n");
                 return false;
             }
@@ -563,9 +566,9 @@ bool PubSubClient::handlePacket(uint8_t hdrLen, size_t length) {
             break;
         case MQTTPINGREQ:
             // MQTT Ping Request: See section 3.12 MQTT v3.1.1 protocol specification
-            _buffer[0] = MQTTPINGRESP;
-            _buffer[1] = 0;
-            if (_client->write(_buffer, 2) != 2) {
+            buf[0] = MQTTPINGRESP;
+            buf[1] = 0;
+            if (_client->write(buf, 2) != 2) {
                 ERROR_PSC_PRINTF_P("handlePacket(): failed to write PINGRESP\n");
                 return false;
             }
@@ -582,7 +585,7 @@ bool PubSubClient::handlePacket(uint8_t hdrLen, size_t length) {
 
 bool PubSubClient::loop() {
     if (_rxFlags & MQTT_RX_BUSY) {
-        // loop() called from within the message callback: _buffer still holds the message, so do not touch it
+        // loop() called from within the message callback: the receive buffer still holds the message, so do not touch it
         ERROR_PSC_PRINTF_P("loop() must not be called from the message callback\n");
         return true;
     }
@@ -615,7 +618,16 @@ bool PubSubClient::loop() {
             }
         }
     }
-    if (_client->available()) {
+    if (_rxBuffer && !_stream) {
+        // Non-blocking receive path (opt-in via setRxBufferSize()): reassemble into the dedicated _rxBuffer,
+        // consuming only already-available bytes. Runs every loop() to also enforce the stall timeout while a
+        // packet is partially received. Does not flush pending outgoing _buffer data: RX and TX use separate
+        // buffers, so an in-progress publish payload stays intact.
+        if (!processInbound()) {
+            // processInbound() has closed the connection and set _state
+            return false;
+        }
+    } else if (_client->available()) {
         if (_bufferWritePos > 0) {
             // readPacket() reuses _buffer: flush pending outgoing payload (beginPublish/write)
             // before receiving, otherwise the incoming packet would overwrite it
@@ -630,7 +642,7 @@ bool PubSubClient::loop() {
         size_t len = readPacket(&hdrLen);
         if (len > 0) {
             _lastInActivity = t;
-            ret = handlePacket(hdrLen, len);
+            ret = handlePacket(_buffer, _bufferSize, hdrLen, len);
             if (!ret) {
                 _state = MQTT_DISCONNECTED;
                 _client->stop();
@@ -641,6 +653,125 @@ bool PubSubClient::loop() {
         }
     }
     return ret;
+}
+
+/**
+ * @brief  Non-blocking incremental receive. Consumes only the bytes currently available in the network stack
+ * (never waits) and reassembles the packet into the dedicated _rxBuffer across loop() calls. Dispatches a
+ * completed packet via handlePacket(). Enforces the per-packet stall timeout so a half-received packet cannot
+ * linger forever. Only used when a receive buffer is set and no Stream is configured (see loop()).
+ *
+ * @return true if processing is ok (packet dispatched, or still in progress). false if the connection was
+ * closed (oversized/invalid packet, stall timeout, or handlePacket() failure); _state is set accordingly.
+ */
+bool PubSubClient::processInbound() {
+    size_t budget = _maxBytesPerLoop ? _maxBytesPerLoop : (size_t)-1;  // bytes to process this loop() call
+    bool progressed = false;
+    unsigned long lastYield = millis();
+
+    while ((budget > 0) && _client->available()) {
+        int rc = _client->read();
+        if (rc < 0) break;  // no byte despite available(): leave, retry next loop()
+        const uint8_t b = (uint8_t)rc;
+        budget--;
+        progressed = true;
+
+        switch (_rxState) {
+            case RX_IDLE:
+                // First byte of a new packet: the fixed-header type byte
+                _rxBuffer[0] = b;
+                _rxLen = 1;
+                _rxLength = 0;
+                _rxMultiplier = 1;
+                _packetReadStart = millis();  // arm the stall timeout
+                _rxState = RX_HEADER;
+                break;
+
+            case RX_HEADER:
+                // Remaining-length varint (1 .. MQTT_MAX_HEADER_SIZE - 1 bytes)
+                _rxBuffer[_rxLen++] = b;
+                _rxLength += (size_t)(b & 0x7F) * _rxMultiplier;
+                _rxMultiplier <<= 7;
+                if ((b & 0x80) == 0) {
+                    // Varint complete: validate size up front (fail-fast, no draining) and move to payload
+                    _rxHdrLen = (uint8_t)(_rxLen - 1);
+                    size_t budgetSize = _rxBufferSize;
+                    if (_maxIncomingPacket && (_maxIncomingPacket < budgetSize)) budgetSize = _maxIncomingPacket;
+                    const size_t totalLen = (size_t)_rxHdrLen + 1 + _rxLength;  // type + remaining-length bytes + remaining length
+                    if (totalLen > budgetSize) {
+                        ERROR_PSC_PRINTF_P("processInbound rejecting oversized packet (%zu > budget %zu)\n", totalLen, budgetSize);
+                        _rxState = RX_IDLE;
+                        _state = MQTT_DISCONNECTED;
+                        _client->stop();
+                        return false;
+                    }
+                    if (_rxLength == 0) {
+                        if (!dispatchInbound()) return false;  // no payload (e.g. PINGRESP): dispatch now
+                    } else {
+                        _rxRemaining = _rxLength;
+                        _rxState = RX_PAYLOAD;
+                    }
+                } else if (_rxLen == MQTT_MAX_HEADER_SIZE) {
+                    // Continuation bit still set after the maximum number of length bytes: invalid encoding
+                    ERROR_PSC_PRINTF_P("processInbound detected packet of invalid length\n");
+                    _rxState = RX_IDLE;
+                    _state = MQTT_DISCONNECTED;
+                    _client->stop();
+                    return false;
+                }
+                break;
+
+            case RX_PAYLOAD:
+                // totalLen <= budgetSize was checked above, so the write always fits
+                _rxBuffer[_rxLen++] = b;
+                if (--_rxRemaining == 0) {
+                    if (!dispatchInbound()) return false;
+                }
+                break;
+
+            default:
+                _rxState = RX_IDLE;
+                break;
+        }
+
+        const unsigned long now = millis();
+        if (now - lastYield >= PUBSUB_YIELD_INTERVAL_MS) {
+            PUBSUB_WAIT_YIELD();
+            lastYield = now;
+        }
+    }
+
+    if (progressed) _lastInActivity = millis();  // receiving data counts as activity (keepalive)
+
+    if (_rxState != RX_IDLE) {
+        // A packet is only partially received. Bound how long it may stay pending, so a peer that stops
+        // mid-packet cannot pin the receive buffer forever. Does not block: just aborts on timeout.
+        const unsigned long packetTimeout = _packetTimeoutMillis ? _packetTimeoutMillis : _socketTimeoutMillis;
+        if ((_packetReadStart != 0) && (millis() - _packetReadStart >= packetTimeout)) {
+            ERROR_PSC_PRINTF_P("processInbound aborting stalled packet\n");
+            _rxState = RX_IDLE;
+            _state = MQTT_CONNECTION_TIMEOUT;
+            _client->stop();
+            _pingOutstanding = false;
+            return false;
+        }
+    }
+    return true;
+}
+
+/**
+ * @brief  Dispatch a fully received packet from _rxBuffer to handlePacket() and reset the receive FSM.
+ *
+ * @return true if the packet was handled. false if handlePacket() failed; the connection is closed here.
+ */
+bool PubSubClient::dispatchInbound() {
+    const bool ok = handlePacket(_rxBuffer, _rxBufferSize, _rxHdrLen, _rxLen);
+    _rxState = RX_IDLE;  // ready for the next packet (handlePacket may have overwritten _rxBuffer with an ACK)
+    if (!ok) {
+        _state = MQTT_DISCONNECTED;
+        _client->stop();
+    }
+    return ok;
 }
 
 bool PubSubClient::publish(const char* topic, const uint8_t* payload, size_t plength, uint8_t qos, bool retained) {
@@ -1074,6 +1205,39 @@ PubSubClient& PubSubClient::setMaxIncomingPacket(size_t size) {
 
 size_t PubSubClient::getMaxIncomingPacket() {
     return _maxIncomingPacket;
+}
+
+bool PubSubClient::setRxBufferSize(size_t size) {
+    if (_rxState != RX_IDLE) return false;  // never resize/free while a packet is being reassembled
+    if (size == 0) {
+        free(_rxBuffer);
+        _rxBuffer = nullptr;
+        _rxBufferSize = 0;
+        return true;  // disabled: back to the blocking receive path
+    }
+    if (size < MQTT_MIN_BUFFER_SIZE) return false;  // too small to hold a packet header safely
+    uint8_t* newBuffer = (uint8_t*)realloc(_rxBuffer, size);  // realloc(nullptr, size) == malloc(size)
+    if (!newBuffer) {
+        // Keep the previous buffer/size: on failure with no previous buffer the client simply stays on the
+        // blocking path, so it remains usable instead of crashing.
+        return false;
+    }
+    _rxBuffer = newBuffer;
+    _rxBufferSize = size;
+    return true;
+}
+
+size_t PubSubClient::getRxBufferSize() {
+    return _rxBufferSize;
+}
+
+PubSubClient& PubSubClient::setMaxBytesPerLoop(size_t maxBytes) {
+    _maxBytesPerLoop = maxBytes;
+    return *this;
+}
+
+size_t PubSubClient::getMaxBytesPerLoop() {
+    return _maxBytesPerLoop;
 }
 
 PubSubClient& PubSubClient::setKeepAlive(uint16_t keepAlive) {

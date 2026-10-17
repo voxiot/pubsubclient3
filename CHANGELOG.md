@@ -11,6 +11,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 - `setMaxIncomingPacket()` / `getMaxIncomingPacket()` to bound the maximum accepted incoming packet size
 - `setPacketTimeout()` / `getPacketTimeout()` to bound the overall packet receive time independently of the per-byte socket timeout
+- Opt-in non-blocking receive: `setRxBufferSize()` / `getRxBufferSize()` allocate a dedicated receive buffer so `loop()` reassembles incoming packets incrementally without ever blocking (default off; classic blocking path unchanged). With a Stream set, the classic path is still used (phase 2)
+- `setMaxBytesPerLoop()` / `getMaxBytesPerLoop()` to bound the received bytes processed per `loop()` call, keeping the main loop responsive for offline functionality
 
 ### Fixed
 

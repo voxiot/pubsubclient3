@@ -38,6 +38,10 @@ getMaxIncomingPacket 	KEYWORD2
 setSocketTimeout 	KEYWORD2
 setPacketTimeout 	KEYWORD2
 getPacketTimeout 	KEYWORD2
+setRxBufferSize 	KEYWORD2
+getRxBufferSize 	KEYWORD2
+setMaxBytesPerLoop 	KEYWORD2
+getMaxBytesPerLoop 	KEYWORD2
 
 #######################################
 # Constants (LITERAL1)
