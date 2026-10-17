@@ -28,6 +28,18 @@
 #endif
 
 /**
+ * @brief Minimum interval, in ms, between cooperative yields while actively draining bytes in readPacket().
+ *
+ * readByte() only yields while waiting for data (socket empty). When a large packet is already buffered in
+ * the network stack, available() stays > 0 and the byte loop would run for thousands of iterations without
+ * ever handing the CPU over, starving the idle/other tasks and tripping the watchdog. This bounds the time
+ * between yields without throttling throughput (a single tick yield every ~50 ms is negligible).
+ */
+#ifndef PUBSUB_YIELD_INTERVAL_MS
+#define PUBSUB_YIELD_INTERVAL_MS 50UL
+#endif
+
+/**
  * @brief Macro to check if a string 's' can be safely added to the MQTT _buffer.
  *
  * If either check fails, the client connection is stopped and the function returns false.
@@ -285,6 +297,11 @@ bool PubSubClient::readByte(uint8_t* result) {
         PUBSUB_WAIT_YIELD();
         unsigned long currentMillis = millis();
         if (currentMillis - previousMillis >= _socketTimeoutMillis) {
+            return false;  // per-byte timeout: no data arrived in time
+        }
+        // Overall packet deadline: a peer dripping one byte just below the per-byte timeout (slowloris)
+        // would otherwise hold readPacket()/loop() for packetLen * socketTimeout. Bound the whole packet.
+        if ((_packetReadStart != 0) && (currentMillis - _packetReadStart >= _socketTimeoutMillis)) {
             return false;
         }
     }
@@ -319,6 +336,7 @@ bool PubSubClient::readByte(uint8_t* result, size_t* pos) {
  */
 size_t PubSubClient::readPacket(uint8_t* hdrLen) {
     size_t len = 0;
+    _packetReadStart = millis();  // arm the overall packet read deadline (see readByte())
     if (!readByte(_buffer, &len)) return 0;
     bool isPublish = (_buffer[0] & 0xF0) == MQTTPUBLISH;
     uint32_t multiplier = 1;
@@ -344,6 +362,20 @@ size_t PubSubClient::readPacket(uint8_t* hdrLen) {
 
     DEBUG_PSC_PRINTF("readPacket received packet of length %zu (isPublish = %u)\n", length, isPublish);
 
+    // Fail-fast on oversized packets when no Stream is set: without a Stream a packet that does not fit the
+    // buffer can never be processed, so draining its (up to 256 MB) payload byte-by-byte would only starve the
+    // main loop and trip the watchdog. Reject up front and close the connection instead of draining.
+    if (!_stream) {
+        const size_t budget = _maxIncomingPacket ? _maxIncomingPacket : _bufferSize;
+        const size_t totalLen = (size_t)*hdrLen + 1 + length;  // type byte + remaining-length bytes + remaining length
+        if (totalLen > budget) {
+            ERROR_PSC_PRINTF_P("readPacket rejecting oversized packet (%zu > budget %zu)\n", totalLen, budget);
+            _state = MQTT_DISCONNECTED;
+            _client->stop();
+            return 0;
+        }
+    }
+
     if (isPublish) {
         if (length < 2) {
             // A PUBLISH packet must at least contain the 2 topic length bytes. Reading them
@@ -364,6 +396,7 @@ size_t PubSubClient::readPacket(uint8_t* hdrLen) {
         }
     }
     size_t idx = len;
+    unsigned long lastYield = millis();
 
     for (size_t i = start; i < length; i++) {
         if (!readByte(&digit)) return 0;
@@ -377,6 +410,14 @@ size_t PubSubClient::readPacket(uint8_t* hdrLen) {
             _buffer[len++] = digit;
         }
         idx++;
+
+        // Yield cooperatively on long/bulk reads where readByte() never waits (available() stays > 0),
+        // otherwise this loop could run without feeding the watchdog. Time-based to avoid throttling throughput.
+        const unsigned long now = millis();
+        if (now - lastYield >= PUBSUB_YIELD_INTERVAL_MS) {
+            PUBSUB_WAIT_YIELD();
+            lastYield = now;
+        }
     }
 
     if (!_stream && (idx > _bufferSize)) {
@@ -460,9 +501,12 @@ bool PubSubClient::handlePacket(uint8_t hdrLen, size_t length) {
                     _buffer[1] = 2;
                     _buffer[2] = (uint8_t)(msgId >> 8);
                     _buffer[3] = (uint8_t)(msgId & 0xFF);
-                    if (_client->write(_buffer, 4) == 4) {
-                        _lastOutActivity = millis();
+                    if (_client->write(_buffer, 4) != 4) {
+                        // socket write failed: the QoS handshake is broken, force a clean reconnect
+                        ERROR_PSC_PRINTF_P("handlePacket(): failed to write PUBACK/PUBREC\n");
+                        return false;
                     }
+                    _lastOutActivity = millis();
                 }
             }
             break;
@@ -484,9 +528,11 @@ bool PubSubClient::handlePacket(uint8_t hdrLen, size_t length) {
             // MQTT Publish Release (QoS 2 publisher handshake, part 2): See section 3.6 MQTT v3.1.1 protocol specification
             _buffer[0] = MQTTPUBREL | 2;  // PUBREL fixed header: bit 1 must be set per spec
             // bytes 1-3 of PUBREL are the same as of PUBREC (remaining length + msgId)
-            if (_client->write(_buffer, 4) == 4) {
-                _lastOutActivity = millis();
+            if (_client->write(_buffer, 4) != 4) {
+                ERROR_PSC_PRINTF_P("handlePacket(): failed to write PUBREL\n");
+                return false;
             }
+            _lastOutActivity = millis();
             break;
         case MQTTPUBREL:
             // MQTT Publish Release (QoS 2 subscriber handshake, part 2): broker releases the message to us.
@@ -498,9 +544,11 @@ bool PubSubClient::handlePacket(uint8_t hdrLen, size_t length) {
             // MQTT Publish Complete (QoS 2 subscriber handshake, part 3): See section 3.7 MQTT v3.1.1 protocol specification
             _buffer[0] = MQTTPUBCOMP;
             // bytes 1-3 of PUBCOMP are the same as of PUBREL (remaining length + msgId)
-            if (_client->write(_buffer, 4) == 4) {
-                _lastOutActivity = millis();
+            if (_client->write(_buffer, 4) != 4) {
+                ERROR_PSC_PRINTF_P("handlePacket(): failed to write PUBCOMP\n");
+                return false;
             }
+            _lastOutActivity = millis();
             break;
         case MQTTPUBCOMP:
             // MQTT Publish Complete (QoS 2 publisher handshake, part 3): broker confirms delivery of our QoS 2 PUBLISH.
@@ -515,9 +563,11 @@ bool PubSubClient::handlePacket(uint8_t hdrLen, size_t length) {
             // MQTT Ping Request: See section 3.12 MQTT v3.1.1 protocol specification
             _buffer[0] = MQTTPINGRESP;
             _buffer[1] = 0;
-            if (_client->write(_buffer, 2) == 2) {
-                _lastOutActivity = millis();
+            if (_client->write(_buffer, 2) != 2) {
+                ERROR_PSC_PRINTF_P("handlePacket(): failed to write PINGRESP\n");
+                return false;
             }
+            _lastOutActivity = millis();
             break;
         case MQTTPINGRESP:
             _pingOutstanding = false;
@@ -837,7 +887,9 @@ inline size_t PubSubClient::writeString(const char* string, size_t pos) {
  */
 size_t PubSubClient::writeNextMsgId(size_t pos) {
     if ((pos + 2) <= _bufferSize) {
-        _nextMsgId = (++_nextMsgId == 0) ? 1 : _nextMsgId;  // increment msgId (must not be 0, so start at 1)
+        // increment msgId (must not be 0, so wrap to 1). Kept as two statements: modifying and reading
+        // _nextMsgId in a single expression is undefined behavior before C++17.
+        if (++_nextMsgId == 0) _nextMsgId = 1;
         _buffer[pos++] = (uint8_t)(_nextMsgId >> 8);
         _buffer[pos++] = (uint8_t)(_nextMsgId & 0xFF);
     } else {
@@ -853,6 +905,7 @@ size_t PubSubClient::writeNextMsgId(size_t pos) {
  * @return Number of bytes appended to the _buffer (0 or 1). If 0 is returned a write error occurred.
  */
 size_t PubSubClient::appendBuffer(uint8_t data) {
+    if (!_buffer || _bufferSize == 0) return 0;  // do not crash if write() is used without a valid buffer
     _buffer[_bufferWritePos++] = data;
     if (_bufferWritePos >= _bufferSize) {
         if (flushBuffer() == 0) return 0;
@@ -930,6 +983,7 @@ bool PubSubClient::unsubscribeImpl(bool progmem, const char* topic) {
 }
 
 PubSubClient& PubSubClient::setServer(uint8_t* ip, uint16_t port) {
+    if (!ip) return *this;  // do not crash on a null pointer
     IPAddress addr(ip[0], ip[1], ip[2], ip[3]);
     return setServer(addr, port);
 }
@@ -1009,6 +1063,15 @@ bool PubSubClient::setBufferSize(size_t size) {
 
 size_t PubSubClient::getBufferSize() {
     return _bufferSize;
+}
+
+PubSubClient& PubSubClient::setMaxIncomingPacket(size_t size) {
+    _maxIncomingPacket = size;
+    return *this;
+}
+
+size_t PubSubClient::getMaxIncomingPacket() {
+    return _maxIncomingPacket;
 }
 
 PubSubClient& PubSubClient::setKeepAlive(uint16_t keepAlive) {

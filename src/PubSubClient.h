@@ -192,6 +192,8 @@ class PubSubClient : public Print {
     uint8_t* _buffer{};
     size_t _bufferSize{};
     size_t _bufferWritePos{};
+    size_t _maxIncomingPacket{};       // max accepted incoming packet size; 0 = limit to _bufferSize (see setMaxIncomingPacket())
+    unsigned long _packetReadStart{};  // millis() when readPacket() started, used as overall packet read deadline
     unsigned long _keepAliveMillis{};
     unsigned long _socketTimeoutMillis{};
     uint16_t _nextMsgId{};
@@ -445,6 +447,25 @@ class PubSubClient : public Print {
      * @return The size of the internal buffer.
      */
     size_t getBufferSize();
+
+    /**
+     * @brief Sets the maximum size, in bytes, of an incoming MQTT packet the client will accept.
+     * An incoming packet whose total size exceeds this limit is rejected up front in readPacket() and the
+     * connection is closed, instead of draining (and discarding) up to 256 MB byte-by-byte, which would
+     * starve the main loop and trigger a watchdog reset.
+     * @param size The maximum incoming packet size in bytes, or 0 to limit incoming packets to the current
+     * buffer size (getBufferSize()). The latter is the default and the safe choice when no Stream is set.
+     * @return The client instance, allowing the function to be chained.
+     * @note Only meaningful together with setStream(): without a Stream a packet larger than the buffer can
+     * never be processed anyway, so the effective limit is min(size, bufferSize).
+     */
+    PubSubClient& setMaxIncomingPacket(size_t size);
+
+    /**
+     * @brief Gets the configured maximum incoming packet size.
+     * @return The configured maximum incoming packet size in bytes, or 0 if it tracks the buffer size.
+     */
+    size_t getMaxIncomingPacket();
 
     /**
      * @brief Connects the client using a clean session without username and password.

@@ -32,6 +32,9 @@ setClient	KEYWORD2
 setStream	KEYWORD2
 setKeepAlive 	KEYWORD2
 setBufferSize 	KEYWORD2
+getBufferSize 	KEYWORD2
+setMaxIncomingPacket 	KEYWORD2
+getMaxIncomingPacket 	KEYWORD2
 setSocketTimeout 	KEYWORD2
 
 #######################################

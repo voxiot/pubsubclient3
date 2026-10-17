@@ -7,6 +7,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+### Added
+
+- `setMaxIncomingPacket()` / `getMaxIncomingPacket()` to bound the maximum accepted incoming packet size
+
+### Fixed
+
+- Reject oversized incoming packets up front in `readPacket()` instead of draining up to 256 MB byte-by-byte (loop starvation / watchdog reset)
+- Add an overall packet read deadline in `readByte()` to defend against slow-drip (slowloris) peers holding `loop()`
+- Yield cooperatively during bulk packet reads to keep feeding the watchdog on ESP32/FreeRTOS
+- Force a clean reconnect when writing a QoS/ping control response (PUBACK/PUBREC/PUBREL/PUBCOMP/PINGRESP) fails
+- Avoid undefined behavior when wrapping `_nextMsgId` (single-expression read/modify)
+- Guard `appendBuffer()` against a missing buffer and `setServer(uint8_t*)` against a null pointer
+
 ## [3.3.2] - 2026-09-27
 
 ### Fixed
