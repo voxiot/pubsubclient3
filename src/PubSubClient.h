@@ -223,7 +223,9 @@ class PubSubClient : public Print {
     int _state{MQTT_DISCONNECTED};
 
     // States of the non-blocking incremental receive FSM (see processInbound()).
-    enum RxState : uint8_t { RX_IDLE = 0, RX_HEADER, RX_PAYLOAD };
+    // RX_DISCARD drops the payload of an oversized packet incrementally, keeping the connection in sync
+    // (the documented "ignore oversized packet" behavior) without ever blocking the loop.
+    enum RxState : uint8_t { RX_IDLE = 0, RX_HEADER, RX_PAYLOAD, RX_DISCARD };
 
     size_t readPacket(uint8_t* hdrLen);
     bool handlePacket(uint8_t* buf, size_t bufSize, uint8_t hdrLen, size_t length);

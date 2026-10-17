@@ -365,19 +365,11 @@ size_t PubSubClient::readPacket(uint8_t* hdrLen) {
 
     DEBUG_PSC_PRINTF("readPacket received packet of length %zu (isPublish = %u)\n", length, isPublish);
 
-    // Fail-fast on oversized packets when no Stream is set: without a Stream a packet that does not fit the
-    // buffer can never be processed, so draining its (up to 256 MB) payload byte-by-byte would only starve the
-    // main loop and trip the watchdog. Reject up front and close the connection instead of draining.
-    if (!_stream) {
-        const size_t budget = _maxIncomingPacket ? _maxIncomingPacket : _bufferSize;
-        const size_t totalLen = (size_t)*hdrLen + 1 + length;  // type byte + remaining-length bytes + remaining length
-        if (totalLen > budget) {
-            ERROR_PSC_PRINTF_P("readPacket rejecting oversized packet (%zu > budget %zu)\n", totalLen, budget);
-            _state = MQTT_DISCONNECTED;
-            _client->stop();
-            return 0;
-        }
-    }
+    // Note: an oversized packet (larger than the buffer, no Stream) is drained and ignored below (see the
+    // idx > _bufferSize check after the read loop), keeping the connection in sync as documented. The drain
+    // is bounded in time by the packet read deadline (setPacketTimeout()) and yields periodically, so it can
+    // no longer starve the loop or trip the watchdog as the unbounded byte-by-byte drain used to. For a
+    // freeze-free path on large/oversized messages, use the non-blocking receive (setRxBufferSize()).
 
     if (isPublish) {
         if (length < 2) {
@@ -391,7 +383,7 @@ size_t PubSubClient::readPacket(uint8_t* hdrLen) {
         // Read in topic length to calculate bytes to skip over for Stream writing
         if (!readByte(_buffer, &len)) return 0;
         if (!readByte(_buffer, &len)) return 0;
-        skip = (_buffer[*hdrLen + 1] << 8) + _buffer[*hdrLen + 2];
+        skip = ((size_t)_buffer[*hdrLen + 1] << 8) + _buffer[*hdrLen + 2];
         start = 2;
         if (MQTT_HDR_GET_QOS(_buffer[0]) > MQTT_QOS0) {
             // skip msgId (packet identifier) for QoS 1 and 2 messages
@@ -464,7 +456,7 @@ bool PubSubClient::handlePacket(uint8_t* buf, size_t bufSize, uint8_t hdrLen, si
                     DEBUG_PSC_PRINTF("handlePacket(): Packet too short to contain topic length field\n");
                     return false;
                 }
-                const uint16_t topicLen = (buf[hdrLen + 1] << 8) + buf[hdrLen + 2];  // topic length in bytes
+                const uint16_t topicLen = (uint16_t)(((uint16_t)buf[hdrLen + 1] << 8) | buf[hdrLen + 2]);  // topic length in bytes
                 char* topic = (char*)(buf + hdrLen + 3 - 1);  // set the topic in the LSB of the topic lenght, as we move it there later
                 const uint8_t publishQos = MQTT_HDR_GET_QOS(buf[0]);  // save QoS before buf[0] is overwritten
 
@@ -497,7 +489,7 @@ bool PubSubClient::handlePacket(uint8_t* buf, size_t bufSize, uint8_t hdrLen, si
                         DEBUG_PSC_PRINTF("handlePacket(): Missing msgId in QoS 1/2 message\n");
                         return false;
                     }
-                    const uint16_t msgId = (buf[payloadOffset] << 8) + buf[payloadOffset + 1];
+                    const uint16_t msgId = (uint16_t)(((uint16_t)buf[payloadOffset] << 8) | buf[payloadOffset + 1]);
                     callback(topic, payload + 2, payloadLen - 2);  // remove the msgId from the callback payload
                     _rxFlags = 0;
                     // QoS 1: respond with PUBACK
@@ -699,13 +691,12 @@ bool PubSubClient::processInbound() {
                     if (_maxIncomingPacket && (_maxIncomingPacket < budgetSize)) budgetSize = _maxIncomingPacket;
                     const size_t totalLen = (size_t)_rxHdrLen + 1 + _rxLength;  // type + remaining-length bytes + remaining length
                     if (totalLen > budgetSize) {
-                        ERROR_PSC_PRINTF_P("processInbound rejecting oversized packet (%zu > budget %zu)\n", totalLen, budgetSize);
-                        _rxState = RX_IDLE;
-                        _state = MQTT_DISCONNECTED;
-                        _client->stop();
-                        return false;
-                    }
-                    if (_rxLength == 0) {
+                        // Oversized: drop the payload incrementally and keep the connection in sync (the
+                        // documented "ignore oversized packet" behavior), without blocking or disconnecting.
+                        ERROR_PSC_PRINTF_P("processInbound ignoring oversized packet (%zu > budget %zu)\n", totalLen, budgetSize);
+                        _rxRemaining = _rxLength;
+                        _rxState = RX_DISCARD;
+                    } else if (_rxLength == 0) {
                         if (!dispatchInbound()) return false;  // no payload (e.g. PINGRESP): dispatch now
                     } else {
                         _rxRemaining = _rxLength;
@@ -726,6 +717,13 @@ bool PubSubClient::processInbound() {
                 _rxBuffer[_rxLen++] = b;
                 if (--_rxRemaining == 0) {
                     if (!dispatchInbound()) return false;
+                }
+                break;
+
+            case RX_DISCARD:
+                // Oversized packet: consume and drop the payload byte, keeping the stream in sync
+                if (--_rxRemaining == 0) {
+                    _rxState = RX_IDLE;  // fully drained: connection stays, packet ignored
                 }
                 break;
 
@@ -1179,6 +1177,10 @@ bool PubSubClient::setBufferSize(size_t size) {
         // into the buffer without further size checks
         return false;
     }
+    if (size > MQTT_MAX_POSSIBLE_PACKET_SIZE) {
+        // Larger than any possible MQTT packet: reject instead of attempting a huge (likely failing) allocation
+        return false;
+    }
     if (_bufferWritePos >= size) {
         // Shrinking below pending outgoing data (beginPublish/write): flush it first to
         // keep the appendBuffer() invariant (_bufferWritePos < _bufferSize)
@@ -1215,7 +1217,8 @@ bool PubSubClient::setRxBufferSize(size_t size) {
         _rxBufferSize = 0;
         return true;  // disabled: back to the blocking receive path
     }
-    if (size < MQTT_MIN_BUFFER_SIZE) return false;  // too small to hold a packet header safely
+    if (size < MQTT_MIN_BUFFER_SIZE) return false;          // too small to hold a packet header safely
+    if (size > MQTT_MAX_POSSIBLE_PACKET_SIZE) return false;  // larger than any possible MQTT packet: reject instead of trying a huge alloc
     uint8_t* newBuffer = (uint8_t*)realloc(_rxBuffer, size);  // realloc(nullptr, size) == malloc(size)
     if (!newBuffer) {
         // Keep the previous buffer/size: on failure with no previous buffer the client simply stays on the

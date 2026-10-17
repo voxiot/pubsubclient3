@@ -16,12 +16,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Fixed
 
-- Reject oversized incoming packets up front in `readPacket()` instead of draining up to 256 MB byte-by-byte (loop starvation / watchdog reset)
+- Bound the receive of an oversized packet: the classic blocking path still drains and ignores it (keeping the connection in sync as documented), but the drain is now bounded by the packet read deadline and yields periodically, so it can no longer starve the loop or trip the watchdog; the non-blocking path drops it incrementally without blocking or disconnecting
 - Add an overall packet read deadline in `readByte()` to defend against slow-drip (slowloris) peers holding `loop()`
 - Yield cooperatively during bulk packet reads to keep feeding the watchdog on ESP32/FreeRTOS
 - Force a clean reconnect when writing a QoS/ping control response (PUBACK/PUBREC/PUBREL/PUBCOMP/PINGRESP) fails
 - Avoid undefined behavior when wrapping `_nextMsgId` (single-expression read/modify)
 - Guard `appendBuffer()` against a missing buffer and `setServer(uint8_t*)` against a null pointer
+- Cap `setBufferSize()` / `setRxBufferSize()` at `MQTT_MAX_POSSIBLE_PACKET_SIZE` to reject nonsensical sizes
+- Fix `-Wsign-conversion` warnings in the topic length, msgId and Stream skip calculations (explicit unsigned shifts)
+
+### Tests
+
+- Add `fragmented_spec` covering non-blocking reassembly byte-by-byte, `setMaxBytesPerLoop()`, incremental oversized discard with resync, and a fragmented QoS 1 PUBLISH/PUBACK
 
 ## [3.3.2] - 2026-09-27
 

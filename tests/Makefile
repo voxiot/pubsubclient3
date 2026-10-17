@@ -27,3 +27,4 @@ test: all
 	@bin/receive_spec
 	@bin/subscribe_spec
 	@bin/keepalive_spec
+	@bin/fragmented_spec
