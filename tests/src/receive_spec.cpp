@@ -473,7 +473,7 @@ bool nestedLoopResult = false;
 int nestedCalls = 0;
 char nestedTopic[16];
 
-void nestedCallback(char* topic, uint8_t* payload, size_t plength) {
+static void nestedCallback(char* topic, uint8_t* payload, size_t plength) {
     nestedCalls++;
     if (nestedCalls == 1) {
         nestedLoopResult = flagsClient->loop();  // must be ignored and must not consume the next packet
