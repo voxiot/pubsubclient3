@@ -481,7 +481,7 @@ bool PubSubClient::handlePacket(uint8_t* buf, size_t bufSize, uint8_t hdrLen, si
                     return false;
                 }
                 const uint16_t topicLen = (uint16_t)(((uint16_t)buf[hdrLen + 1] << 8) | buf[hdrLen + 2]);  // topic length in bytes
-                char* topic = (char*)(buf + hdrLen + 3 - 1);  // set the topic in the LSB of the topic lenght, as we move it there later
+                char* topic = (char*)(buf + hdrLen + 3 - 1);          // set the topic in the LSB of the topic lenght, as we move it there later
                 const uint8_t publishQos = MQTT_HDR_GET_QOS(buf[0]);  // save QoS before buf[0] is overwritten
 
                 // Guard 2: ensure topic fits in buffer. Compare topicLen against the remaining length instead of
@@ -491,8 +491,9 @@ bool PubSubClient::handlePacket(uint8_t* buf, size_t bufSize, uint8_t hdrLen, si
                     ERROR_PSC_PRINTF_P("handlePacket(): Suspicious topicLen (%u) points outside of received buffer length (%zu)\n", topicLen, length);
                     return false;
                 }
-                const size_t payloadOffset = (size_t)hdrLen + 3 + topicLen;  // payload starts after header and topic (if there is no packet identifier), <= length
-                if (publishQos > MQTT_QOS2) {  // QoS 3 is a protocol violation, see section 3.3.1.2 MQTT v3.1.1 protocol specification
+                const size_t payloadOffset =
+                    (size_t)hdrLen + 3 + topicLen;  // payload starts after header and topic (if there is no packet identifier), <= length
+                if (publishQos > MQTT_QOS2) {       // QoS 3 is a protocol violation, see section 3.3.1.2 MQTT v3.1.1 protocol specification
                     ERROR_PSC_PRINTF_P("handlePacket(): Invalid QoS %u in PUBLISH\n", publishQos);
                     return false;
                 }
@@ -1280,8 +1281,8 @@ bool PubSubClient::setRxBufferSize(size_t size) {
         _rxBufferSize = 0;
         return true;  // disabled: back to the blocking receive path
     }
-    if (size < MQTT_MIN_BUFFER_SIZE) return false;          // too small to hold a packet header safely
-    if (size > MQTT_MAX_POSSIBLE_PACKET_SIZE) return false;  // larger than any possible MQTT packet: reject instead of trying a huge alloc
+    if (size < MQTT_MIN_BUFFER_SIZE) return false;            // too small to hold a packet header safely
+    if (size > MQTT_MAX_POSSIBLE_PACKET_SIZE) return false;   // larger than any possible MQTT packet: reject instead of trying a huge alloc
     uint8_t* newBuffer = (uint8_t*)realloc(_rxBuffer, size);  // realloc(nullptr, size) == malloc(size)
     if (!newBuffer) {
         // Keep the previous buffer/size: on failure with no previous buffer the client simply stays on the

@@ -220,23 +220,23 @@ class PubSubClient : public Print {
     uint8_t* _buffer{};
     size_t _bufferSize{};
     size_t _bufferWritePos{};
-    size_t _maxIncomingPacket{};       // max accepted incoming packet size; 0 = limit to _bufferSize (see setMaxIncomingPacket())
+    size_t _maxIncomingPacket{};  // max accepted incoming packet size; 0 = limit to _bufferSize (see setMaxIncomingPacket())
     // Non-blocking receive state (opt-in via setRxBufferSize()). When _rxBuffer is set and no Stream is used,
     // loop() reassembles incoming packets incrementally into this dedicated buffer across calls, so the main
     // loop never blocks waiting for bytes. The buffer is dedicated to RX, so outgoing traffic on _buffer
     // (publish/keepalive) can never corrupt an in-progress reassembly.
     uint8_t* _rxBuffer{};
     size_t _rxBufferSize{};
-    size_t _maxBytesPerLoop{};  // max bytes processed per loop() in non-blocking mode; 0 = all available (see setMaxBytesPerLoop())
-    uint8_t _rxState{};          // RxState: current state of the incremental receive FSM
-    uint8_t _rxHdrLen{};         // number of remaining-length bytes of the packet being received
-    uint8_t _oversizedPolicy{};  // MQTT_OVERSIZED_DISCONNECT (default) or MQTT_OVERSIZED_IGNORE (see setOversizedPolicy())
-    uint32_t _rxMultiplier{};   // remaining-length varint multiplier carried across loop() calls
-    size_t _rxLen{};            // bytes written into _rxBuffer so far
-    size_t _rxLength{};         // decoded remaining length of the packet being received
-    size_t _rxRemaining{};      // payload bytes still to be received
-    size_t _rxStreamSkip{};     // index within the remaining length at which the payload (streamed bytes) begins
-    unsigned long _packetReadStart{};    // millis() when the current packet started, used as overall packet read deadline
+    size_t _maxBytesPerLoop{};         // max bytes processed per loop() in non-blocking mode; 0 = all available (see setMaxBytesPerLoop())
+    uint8_t _rxState{};                // RxState: current state of the incremental receive FSM
+    uint8_t _rxHdrLen{};               // number of remaining-length bytes of the packet being received
+    uint8_t _oversizedPolicy{};        // MQTT_OVERSIZED_DISCONNECT (default) or MQTT_OVERSIZED_IGNORE (see setOversizedPolicy())
+    uint32_t _rxMultiplier{};          // remaining-length varint multiplier carried across loop() calls
+    size_t _rxLen{};                   // bytes written into _rxBuffer so far
+    size_t _rxLength{};                // decoded remaining length of the packet being received
+    size_t _rxRemaining{};             // payload bytes still to be received
+    size_t _rxStreamSkip{};            // index within the remaining length at which the payload (streamed bytes) begins
+    unsigned long _packetReadStart{};  // millis() when the current packet started, used as overall packet read deadline
     unsigned long _keepAliveMillis{};
     unsigned long _socketTimeoutMillis{};
     unsigned long _packetTimeoutMillis{};  // overall deadline for a single packet; 0 = fall back to _socketTimeoutMillis (see setPacketTimeout())

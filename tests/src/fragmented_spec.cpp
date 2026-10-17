@@ -64,9 +64,9 @@ static int test_fragmented_receive() {
     byte publish[] = {0x30, 0x0E, 0x00, 0x05, 't', 'o', 'p', 'i', 'c', 'p', 'a', 'y', 'l', 'o', 'a', 'd'};
 
     for (size_t i = 0; i < sizeof(publish); i++) {
-        IS_FALSE(callback_called);        // callback must not fire before the last byte
+        IS_FALSE(callback_called);  // callback must not fire before the last byte
         shimClient.respond(&publish[i], 1);
-        IS_TRUE(client.loop());           // never blocks, stays connected
+        IS_TRUE(client.loop());  // never blocks, stays connected
     }
 
     IS_TRUE(callback_called);
@@ -126,8 +126,8 @@ static int test_fragmented_oversized_discard() {
         shimClient.respond(&big[i], 1);
         IS_TRUE(client.loop());  // never blocks, never disconnects
     }
-    IS_FALSE(callback_called);      // oversized packet ignored
-    IS_TRUE(client.connected());    // connection kept
+    IS_FALSE(callback_called);    // oversized packet ignored
+    IS_TRUE(client.connected());  // connection kept
 
     // A following well-sized PUBLISH must still be received: the stream stayed in sync through the discard
     byte publish[] = {0x30, 0x0E, 0x00, 0x05, 't', 'o', 'p', 'i', 'c', 'p', 'a', 'y', 'l', 'o', 'a', 'd'};
@@ -198,7 +198,7 @@ static int test_fragmented_stream() {
     IS_TRUE(callback_called);
     IS_TRUE(strcmp(lastTopic, "topic") == 0);
     IS_TRUE(lastLength == 7);
-    IS_FALSE(stream.error());       // the exact payload bytes were streamed
+    IS_FALSE(stream.error());  // the exact payload bytes were streamed
     IS_FALSE(shimClient.error());
     IS_TRUE(client.connected());
 
