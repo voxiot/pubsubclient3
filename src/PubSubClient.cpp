@@ -610,11 +610,11 @@ bool PubSubClient::loop() {
             }
         }
     }
-    if (_rxBuffer && !_stream) {
+    if (_rxBuffer) {
         // Non-blocking receive path (opt-in via setRxBufferSize()): reassemble into the dedicated _rxBuffer,
-        // consuming only already-available bytes. Runs every loop() to also enforce the stall timeout while a
-        // packet is partially received. Does not flush pending outgoing _buffer data: RX and TX use separate
-        // buffers, so an in-progress publish payload stays intact.
+        // consuming only already-available bytes. Also streams payload bytes to a configured Stream (phase 2).
+        // Runs every loop() to enforce the stall timeout while a packet is partially received. Does not flush
+        // pending outgoing _buffer data: RX and TX use separate buffers, so an in-progress publish payload stays intact.
         if (!processInbound()) {
             // processInbound() has closed the connection and set _state
             return false;
@@ -685,22 +685,30 @@ bool PubSubClient::processInbound() {
                 _rxLength += (size_t)(b & 0x7F) * _rxMultiplier;
                 _rxMultiplier <<= 7;
                 if ((b & 0x80) == 0) {
-                    // Varint complete: validate size up front (fail-fast, no draining) and move to payload
+                    // Varint complete: decide how to consume the remaining length
                     _rxHdrLen = (uint8_t)(_rxLen - 1);
-                    size_t budgetSize = _rxBufferSize;
-                    if (_maxIncomingPacket && (_maxIncomingPacket < budgetSize)) budgetSize = _maxIncomingPacket;
-                    const size_t totalLen = (size_t)_rxHdrLen + 1 + _rxLength;  // type + remaining-length bytes + remaining length
-                    if (totalLen > budgetSize) {
-                        // Oversized: drop the payload incrementally and keep the connection in sync (the
-                        // documented "ignore oversized packet" behavior), without blocking or disconnecting.
-                        ERROR_PSC_PRINTF_P("processInbound ignoring oversized packet (%zu > budget %zu)\n", totalLen, budgetSize);
-                        _rxRemaining = _rxLength;
-                        _rxState = RX_DISCARD;
-                    } else if (_rxLength == 0) {
+                    _rxStreamSkip = 0;  // (re)computed once the topic length is known (see RX_PAYLOAD)
+                    if (_rxLength == 0) {
                         if (!dispatchInbound()) return false;  // no payload (e.g. PINGRESP): dispatch now
-                    } else {
-                        _rxRemaining = _rxLength;
+                        break;
+                    }
+                    _rxRemaining = _rxLength;
+                    if (_stream) {
+                        // With a Stream, payload bytes that do not fit the buffer are written to the Stream,
+                        // so an oversized packet is not rejected here (see RX_PAYLOAD).
                         _rxState = RX_PAYLOAD;
+                    } else {
+                        size_t budgetSize = _rxBufferSize;
+                        if (_maxIncomingPacket && (_maxIncomingPacket < budgetSize)) budgetSize = _maxIncomingPacket;
+                        const size_t totalLen = (size_t)_rxHdrLen + 1 + _rxLength;  // type + remaining-length bytes + remaining length
+                        if (totalLen > budgetSize) {
+                            // Oversized: drop the payload incrementally and keep the connection in sync (the
+                            // documented "ignore oversized packet" behavior), without blocking or disconnecting.
+                            ERROR_PSC_PRINTF_P("processInbound ignoring oversized packet (%zu > budget %zu)\n", totalLen, budgetSize);
+                            _rxState = RX_DISCARD;
+                        } else {
+                            _rxState = RX_PAYLOAD;
+                        }
                     }
                 } else if (_rxLen == MQTT_MAX_HEADER_SIZE) {
                     // Continuation bit still set after the maximum number of length bytes: invalid encoding
@@ -712,13 +720,28 @@ bool PubSubClient::processInbound() {
                 }
                 break;
 
-            case RX_PAYLOAD:
-                // totalLen <= budgetSize was checked above, so the write always fits
-                _rxBuffer[_rxLen++] = b;
+            case RX_PAYLOAD: {
+                // consumed = 0-based index of this byte within the remaining length
+                const size_t consumed = _rxLength - _rxRemaining;
+                if (_rxLen < _rxBufferSize) {
+                    _rxBuffer[_rxLen++] = b;  // store header/topic/msgId and as much payload as fits
+                }
+                if (_stream && ((_rxBuffer[0] & 0xF0) == MQTTPUBLISH)) {
+                    if (consumed == 2) {
+                        // both topic-length bytes are now in the buffer: locate the start of the payload
+                        const size_t topicLen = ((size_t)_rxBuffer[_rxHdrLen + 1] << 8) | _rxBuffer[_rxHdrLen + 2];
+                        const size_t msgIdLen = (MQTT_HDR_GET_QOS(_rxBuffer[0]) > MQTT_QOS0) ? 2 : 0;
+                        _rxStreamSkip = 2 + topicLen + msgIdLen;  // index within the remaining length where payload begins
+                    }
+                    if ((consumed >= 2) && (consumed >= _rxStreamSkip)) {
+                        _stream->write(b);  // write payload bytes to the Stream (also those that did not fit the buffer)
+                    }
+                }
                 if (--_rxRemaining == 0) {
                     if (!dispatchInbound()) return false;
                 }
                 break;
+            }
 
             case RX_DISCARD:
                 // Oversized packet: consume and drop the payload byte, keeping the stream in sync

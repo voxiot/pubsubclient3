@@ -2,6 +2,7 @@
 #include "Buffer.h"
 #include "PubSubClient.h"
 #include "ShimClient.h"
+#include "Stream.h"
 #include "trace.h"
 
 // Non-blocking incremental receive (setRxBufferSize()): verify that a packet split across many loop() calls
@@ -22,6 +23,7 @@ static int test_fragmented_receive();
 static int test_max_bytes_per_loop();
 static int test_fragmented_oversized_discard();
 static int test_fragmented_qos1();
+static int test_fragmented_stream();
 
 static void reset_callback() {
     callback_called = false;
@@ -167,12 +169,46 @@ static int test_fragmented_qos1() {
     END_IT
 }
 
+static int test_fragmented_stream() {
+    IT("streams a fragmented PUBLISH payload to the Stream (phase 2)");
+    reset_callback();
+
+    Stream stream;
+    uint8_t expectedPayload[] = "payload";
+    stream.expect(expectedPayload, sizeof(expectedPayload) - 1);  // 7 payload bytes must reach the Stream
+
+    ShimClient shimClient;
+    shimClient.setAllowConnect(true);
+    byte connack[] = {0x20, 0x02, 0x00, 0x00};
+    shimClient.respond(connack, sizeof(connack));
+
+    PubSubClient client(server, 1883, callback, shimClient, stream);
+    IS_TRUE(client.setRxBufferSize(64));
+    IS_TRUE(client.connect("fragment_test"));
+
+    byte publish[] = {0x30, 0x0E, 0x00, 0x05, 't', 'o', 'p', 'i', 'c', 'p', 'a', 'y', 'l', 'o', 'a', 'd'};
+    for (size_t i = 0; i < sizeof(publish); i++) {
+        shimClient.respond(&publish[i], 1);
+        IS_TRUE(client.loop());
+    }
+
+    IS_TRUE(callback_called);
+    IS_TRUE(strcmp(lastTopic, "topic") == 0);
+    IS_TRUE(lastLength == 7);
+    IS_FALSE(stream.error());       // the exact payload bytes were streamed
+    IS_FALSE(shimClient.error());
+    IS_TRUE(client.connected());
+
+    END_IT
+}
+
 int main() {
     SUITE("Fragmented (non-blocking receive)");
     test_fragmented_receive();
     test_max_bytes_per_loop();
     test_fragmented_oversized_discard();
     test_fragmented_qos1();
+    test_fragmented_stream();
 
     FINISH
 }

@@ -206,6 +206,7 @@ class PubSubClient : public Print {
     size_t _rxLen{};            // bytes written into _rxBuffer so far
     size_t _rxLength{};         // decoded remaining length of the packet being received
     size_t _rxRemaining{};      // payload bytes still to be received
+    size_t _rxStreamSkip{};     // index within the remaining length at which the payload (streamed bytes) begins
     unsigned long _packetReadStart{};    // millis() when the current packet started, used as overall packet read deadline
     unsigned long _keepAliveMillis{};
     unsigned long _socketTimeoutMillis{};
@@ -223,8 +224,9 @@ class PubSubClient : public Print {
     int _state{MQTT_DISCONNECTED};
 
     // States of the non-blocking incremental receive FSM (see processInbound()).
-    // RX_DISCARD drops the payload of an oversized packet incrementally, keeping the connection in sync
-    // (the documented "ignore oversized packet" behavior) without ever blocking the loop.
+    // RX_PAYLOAD stores the packet into _rxBuffer and, when a Stream is set, also writes payload bytes to it.
+    // RX_DISCARD drops the payload of an oversized packet incrementally (no Stream), keeping the connection in
+    // sync (the documented "ignore oversized packet" behavior) without ever blocking the loop.
     enum RxState : uint8_t { RX_IDLE = 0, RX_HEADER, RX_PAYLOAD, RX_DISCARD };
 
     size_t readPacket(uint8_t* hdrLen);

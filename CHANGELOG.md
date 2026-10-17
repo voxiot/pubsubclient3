@@ -11,7 +11,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 - `setMaxIncomingPacket()` / `getMaxIncomingPacket()` to bound the maximum accepted incoming packet size
 - `setPacketTimeout()` / `getPacketTimeout()` to bound the overall packet receive time independently of the per-byte socket timeout
-- Opt-in non-blocking receive: `setRxBufferSize()` / `getRxBufferSize()` allocate a dedicated receive buffer so `loop()` reassembles incoming packets incrementally without ever blocking (default off; classic blocking path unchanged). With a Stream set, the classic path is still used (phase 2)
+- Opt-in non-blocking receive: `setRxBufferSize()` / `getRxBufferSize()` allocate a dedicated receive buffer so `loop()` reassembles incoming packets incrementally without ever blocking (default off; classic blocking path unchanged). Works with a Stream too: payload bytes are streamed incrementally
 - `setMaxBytesPerLoop()` / `getMaxBytesPerLoop()` to bound the received bytes processed per `loop()` call, keeping the main loop responsive for offline functionality
 
 ### Fixed
@@ -27,7 +27,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Tests
 
-- Add `fragmented_spec` covering non-blocking reassembly byte-by-byte, `setMaxBytesPerLoop()`, incremental oversized discard with resync, and a fragmented QoS 1 PUBLISH/PUBACK
+- Add `fragmented_spec` covering non-blocking reassembly byte-by-byte, `setMaxBytesPerLoop()`, incremental oversized discard with resync, a fragmented QoS 1 PUBLISH/PUBACK, and fragmented Stream payload delivery
 
 ## [3.3.2] - 2026-09-27
 
