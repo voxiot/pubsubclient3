@@ -301,7 +301,9 @@ bool PubSubClient::readByte(uint8_t* result) {
         }
         // Overall packet deadline: a peer dripping one byte just below the per-byte timeout (slowloris)
         // would otherwise hold readPacket()/loop() for packetLen * socketTimeout. Bound the whole packet.
-        if ((_packetReadStart != 0) && (currentMillis - _packetReadStart >= _socketTimeoutMillis)) {
+        // Independent of the per-byte socket timeout; 0 falls back to it (see setPacketTimeout()).
+        const unsigned long packetTimeout = _packetTimeoutMillis ? _packetTimeoutMillis : _socketTimeoutMillis;
+        if ((_packetReadStart != 0) && (currentMillis - _packetReadStart >= packetTimeout)) {
             return false;
         }
     }
@@ -1082,6 +1084,15 @@ PubSubClient& PubSubClient::setKeepAlive(uint16_t keepAlive) {
 PubSubClient& PubSubClient::setSocketTimeout(uint16_t timeout) {
     _socketTimeoutMillis = timeout * 1000UL;
     return *this;
+}
+
+PubSubClient& PubSubClient::setPacketTimeout(uint16_t timeout) {
+    _packetTimeoutMillis = timeout * 1000UL;
+    return *this;
+}
+
+uint16_t PubSubClient::getPacketTimeout() {
+    return (uint16_t)(_packetTimeoutMillis / 1000UL);
 }
 
 int PubSubClient::state() {

@@ -10,6 +10,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 ### Added
 
 - `setMaxIncomingPacket()` / `getMaxIncomingPacket()` to bound the maximum accepted incoming packet size
+- `setPacketTimeout()` / `getPacketTimeout()` to bound the overall packet receive time independently of the per-byte socket timeout
 
 ### Fixed
 

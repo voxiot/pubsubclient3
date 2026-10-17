@@ -193,9 +193,10 @@ class PubSubClient : public Print {
     size_t _bufferSize{};
     size_t _bufferWritePos{};
     size_t _maxIncomingPacket{};       // max accepted incoming packet size; 0 = limit to _bufferSize (see setMaxIncomingPacket())
-    unsigned long _packetReadStart{};  // millis() when readPacket() started, used as overall packet read deadline
+    unsigned long _packetReadStart{};    // millis() when readPacket() started, used as overall packet read deadline
     unsigned long _keepAliveMillis{};
     unsigned long _socketTimeoutMillis{};
+    unsigned long _packetTimeoutMillis{};  // overall deadline for a single packet; 0 = fall back to _socketTimeoutMillis (see setPacketTimeout())
     uint16_t _nextMsgId{};
     uint8_t _rxFlags{};  // PUBLISH header low nibble (retain, QoS, DUP) + MQTT_RX_BUSY while in callback; placed here to use alignment padding
     unsigned long _lastOutActivity{};
@@ -423,6 +424,24 @@ class PubSubClient : public Print {
      * @return The client instance, allowing the function to be chained.
      */
     PubSubClient& setSocketTimeout(uint16_t timeout);
+
+    /**
+     * @brief Sets the overall deadline for receiving a single MQTT packet.
+     * This is independent of setSocketTimeout(): the socket timeout bounds the wait for an individual byte
+     * (and thus how long a single readPacket()/loop() call may block), while the packet timeout bounds the
+     * time the whole packet may take to arrive. Decoupling them lets you keep a short socket timeout (so the
+     * main loop stays responsive and offline functionality is not frozen) while still accepting a large
+     * message that legitimately takes longer than the socket timeout to be received on a slow link.
+     * @param timeout The packet timeout, in seconds, or 0 to fall back to the socket timeout (the default).
+     * @return The client instance, allowing the function to be chained.
+     */
+    PubSubClient& setPacketTimeout(uint16_t timeout);
+
+    /**
+     * @brief Gets the configured packet timeout.
+     * @return The configured packet timeout in seconds, or 0 if it falls back to the socket timeout.
+     */
+    uint16_t getPacketTimeout();
 
     /**
      * @brief Sets the size, in bytes, of the internal send and receive buffer.
