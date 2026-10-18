@@ -7,6 +7,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+### Fixed
+
+- Complete a short outgoing write instead of abandoning the packet: a `Client` that accepts fewer bytes than asked (full transmit window, timeout mid-record) left a truncated packet on the wire, and since its fixed header had already announced a remaining length, the peer took the following packet as its continuation — an undetected desync that no later packet recovers from, while the connection kept looking healthy. The remainder is now retried (yielding between attempts) until the socket takes it, the socket closes, or `setSocketTimeout()` runs out. Covers `writeBuffer()` (CONNECT/SUBSCRIBE/UNSUBSCRIBE and the `endPublish()` flush, both the plain and the `MQTT_MAX_TRANSFER_SIZE` chunked branch), the `beginPublish()` header/topic write, and the `PINGREQ` sent from `loop()`
+- Force a clean reconnect only when the deadline expires with bytes already on the wire, where a reconnect is the one way back in sync (and the alternative merely postpones it: the next `PINGREQ` is swallowed by the truncated packet, so the keepalive tears the connection down up to two keepalive intervals later, with every publish in between reported as sent). A write that placed **no** byte leaves the stream correctly framed, so it keeps the connection and only reports the failure, as before
+- Yield cooperatively with the platform-aware `PUBSUB_WAIT_YIELD()` in the `MQTT_MAX_TRANSFER_SIZE` write loop, which still used a plain `yield()` (a no-op for watchdog purposes on ESP32/FreeRTOS, where only blocking for a tick hands the CPU over)
+
+### Tests
+
+- `publish_spec`: a publish whose every write is short still delivers the exact same bytes; a write that places nothing fails the publish but keeps the connection; a partial write of the header, and of the payload, each close the connection (`MQTT_CONNECTION_LOST`). `connect_spec`: a partial CONNECT write fails the connect and closes the socket
+- `ShimClient`: `setWriteLimit()` simulates a socket that stops accepting bytes, `setWriteChunk()` one that accepts only a few bytes per call
+
 ## [4.0.0] - 2026-10-17
 
 First release of the `voxiot/pubsubclient3` fork, diverging from `hmueller01/pubsubclient3` (based on upstream `v3.3.2`). Focus: robust, watchdog-safe, 24/7 operation on unreliable connectivity. The public API stays backward compatible; all new resilience features are opt-in, except the oversized-packet default which now closes the connection (see `setOversizedPolicy()`).

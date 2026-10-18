@@ -22,6 +22,7 @@ int test_connect_with_will();
 int test_connect_with_will_username_password();
 int test_connect_disconnect_connect();
 int test_connect_custom_keepalive();
+int test_connect_fails_on_partial_write();
 
 void callback(_UNUSED_ char* topic, _UNUSED_ uint8_t* payload, _UNUSED_ size_t plength) {
     // handle message arrived
@@ -338,6 +339,32 @@ int test_connect_custom_keepalive() {
     END_IT
 }
 
+int test_connect_fails_on_partial_write() {
+    IT("fails to connect and closes the socket if the CONNECT is only partially written");
+    ShimClient shimClient;
+    shimClient.setAllowConnect(true);
+
+    byte connack[] = {0x20, 0x02, 0x00, 0x00};
+    shimClient.respond(connack, sizeof(connack));
+
+    // Let only the first bytes of the CONNECT packet out and then nothing, so the remainder can never be
+    // completed. The socket is up but the broker will never see a complete CONNECT, so the attempt must
+    // fail and the socket must be closed instead of waiting for a CONNACK that cannot come (and instead of
+    // leaving a half-written packet for the next attempt).
+    shimClient.setWriteLimit(5);
+
+    PubSubClient client(server, 1883, callback, shimClient);
+    client.setSocketTimeout(1);  // bound the retry of the remainder
+    bool rc = client.connect("client_test1");
+    IS_FALSE(rc);
+
+    int state = client.state();
+    IS_TRUE(state == MQTT_CONNECT_FAILED);
+    IS_FALSE(shimClient.connected());
+
+    END_IT
+}
+
 int main() {
     SUITE("Connect");
 
@@ -357,5 +384,6 @@ int main() {
     test_connect_disconnect_connect();
 
     test_connect_custom_keepalive();
+    test_connect_fails_on_partial_write();
     FINISH
 }

@@ -14,6 +14,9 @@ class ShimClient : public Client {
     bool _connected;
     bool expectAnything;
     bool _error;
+    bool _writeLimited;
+    size_t _writeLimit;
+    size_t _writeChunk;
     uint16_t _received;
     IPAddress _expectedIP;
     uint16_t _expectedPort;
@@ -45,6 +48,14 @@ class ShimClient : public Client {
 
     virtual void setAllowConnect(bool b);
     virtual void setConnected(bool b);
+
+    // Accept at most 'bytes' more bytes in total; any write beyond that returns short (or 0), as a
+    // real socket does when the send times out mid-record. Used to test partial-write handling.
+    virtual void setWriteLimit(size_t bytes);
+
+    // Accept at most 'bytes' per write() call, with no total limit: every write returns short but the
+    // data always gets through if the caller writes the remainder. Models a full transmit window.
+    virtual void setWriteChunk(size_t bytes);
 };
 
 #endif

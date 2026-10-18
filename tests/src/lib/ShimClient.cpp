@@ -19,6 +19,9 @@ ShimClient::ShimClient() {
     this->_allowConnect = true;
     this->_connected = false;
     this->_error = false;
+    this->_writeLimited = false;
+    this->_writeLimit = 0;
+    this->_writeChunk = 0;
     this->expectAnything = true;
     this->_received = 0;
     this->_expectedPort = 0;
@@ -57,6 +60,13 @@ int ShimClient::connect(const char *host, uint16_t port) {
     return this->_connected;
 }
 size_t ShimClient::write(uint8_t b) {
+    if (this->_writeLimited) {
+        if (this->_writeLimit == 0) {
+            TRACE("write limit reached\n");
+            return 0;
+        }
+        this->_writeLimit--;
+    }
     this->_received += 1;
     TRACE(std::hex << (unsigned int)b);
     if (!this->expectAnything) {
@@ -74,6 +84,20 @@ size_t ShimClient::write(uint8_t b) {
     return 1;
 }
 size_t ShimClient::write(const uint8_t *buf, size_t size) {
+    if ((this->_writeChunk > 0) && (size > this->_writeChunk)) {
+        TRACE("write chunked to " << std::dec << (unsigned int)(this->_writeChunk) << " of " << (unsigned int)(size) << "\n");
+        size = this->_writeChunk;
+    }
+    if (this->_writeLimited) {
+        if (size > this->_writeLimit) {
+            TRACE("write limited to " << std::dec << (unsigned int)(this->_writeLimit) << " of " << (unsigned int)(size) << "\n");
+            size = this->_writeLimit;
+        }
+        this->_writeLimit -= size;
+        if (size == 0) {
+            return 0;
+        }
+    }
     this->_received += size;
     TRACE("[" << std::dec << (unsigned int)(size) << "] ");
     uint16_t i = 0;
@@ -141,6 +165,13 @@ void ShimClient::setConnected(bool b) {
 }
 void ShimClient::setAllowConnect(bool b) {
     this->_allowConnect = b;
+}
+void ShimClient::setWriteLimit(size_t bytes) {
+    this->_writeLimited = true;
+    this->_writeLimit = bytes;
+}
+void ShimClient::setWriteChunk(size_t bytes) {
+    this->_writeChunk = bytes;
 }
 
 bool ShimClient::error() {

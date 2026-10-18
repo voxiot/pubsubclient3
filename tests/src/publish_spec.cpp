@@ -27,6 +27,10 @@ int test_publish_FlashStringHelper();
 int test_publish_FlashStringHelper2();
 int test_publish_P_FlashStringHelper();
 int test_publish_P_P();
+int test_publish_completes_short_writes();
+int test_publish_nothing_written_keeps_connection();
+int test_publish_partial_write_header();
+int test_publish_partial_write_payload();
 
 void callback(_UNUSED_ char* topic, _UNUSED_ uint8_t* payload, _UNUSED_ size_t plength) {
     // handle message arrived
@@ -516,6 +520,116 @@ int test_publish_P_qos2() {
     END_IT
 }
 
+int test_publish_completes_short_writes() {
+    IT("completes a publish whose writes are all short");
+    ShimClient shimClient;
+    shimClient.setAllowConnect(true);
+
+    byte connack[] = {0x20, 0x02, 0x00, 0x00};
+    shimClient.respond(connack, sizeof(connack));
+
+    PubSubClient client(server, 1883, callback, shimClient);
+    bool rc = client.connect("client_test1");
+    IS_TRUE(rc);
+
+    // A socket that never takes more than 4 bytes at a time: a transient short write is the common case
+    // in the field (full transmit window), so the packet must be completed rather than abandoned, and the
+    // expect() buffer proves the broker sees the same bytes as an unrestricted write would have sent.
+    byte publish[] = {0x30, 0x0e, 0x00, 0x05, 't', 'o', 'p', 'i', 'c', 'p', 'a', 'y', 'l', 'o', 'a', 'd'};
+    shimClient.expect(publish, sizeof(publish));
+    shimClient.setWriteChunk(4);
+
+    rc = client.publish("topic", "payload");
+    IS_TRUE(rc);
+
+    IS_FALSE(shimClient.error());
+    IS_EQUAL(client.state(), MQTT_CONNECTED);
+    IS_TRUE(client.connected());
+
+    END_IT
+}
+
+int test_publish_nothing_written_keeps_connection() {
+    IT("keeps the connection when the publish write places no byte at all");
+    ShimClient shimClient;
+    shimClient.setAllowConnect(true);
+
+    byte connack[] = {0x20, 0x02, 0x00, 0x00};
+    shimClient.respond(connack, sizeof(connack));
+
+    PubSubClient client(server, 1883, callback, shimClient);
+    client.setSocketTimeout(1);  // keep the retry window short; the deadline is reached either way
+    bool rc = client.connect("client_test1");
+    IS_TRUE(rc);
+
+    // The socket accepts nothing from here on. No byte of the packet reached the broker, so the stream is
+    // still correctly framed: the publish fails, but tearing the connection down would be gratuitous.
+    shimClient.setWriteLimit(0);
+
+    rc = client.publish("topic", "payload");
+    IS_FALSE(rc);
+
+    IS_EQUAL(client.state(), MQTT_CONNECTED);
+    IS_TRUE(client.connected());
+
+    END_IT
+}
+
+int test_publish_partial_write_header() {
+    IT("closes the connection when the publish header is only partially written");
+    ShimClient shimClient;
+    shimClient.setAllowConnect(true);
+
+    byte connack[] = {0x20, 0x02, 0x00, 0x00};
+    shimClient.respond(connack, sizeof(connack));
+
+    PubSubClient client(server, 1883, callback, shimClient);
+    client.setSocketTimeout(1);  // bound the retry of the remainder
+    bool rc = client.connect("client_test1");
+    IS_TRUE(rc);
+
+    // The header+topic write is 9 bytes (2 header + 2 topic length + 5 topic): let only 5 of them out and
+    // then nothing, so the remainder can never be completed. Those 5 bytes announced a remaining length,
+    // so the broker would read this payload out of the next packet: the client must close to resynchronise.
+    shimClient.setWriteLimit(5);
+
+    rc = client.publish("topic", "payload");
+    IS_FALSE(rc);
+
+    IS_EQUAL(client.state(), MQTT_CONNECTION_LOST);
+    IS_FALSE(shimClient.connected());
+    IS_FALSE(client.connected());
+
+    END_IT
+}
+
+int test_publish_partial_write_payload() {
+    IT("closes the connection when the publish payload is only partially written");
+    ShimClient shimClient;
+    shimClient.setAllowConnect(true);
+
+    byte connack[] = {0x20, 0x02, 0x00, 0x00};
+    shimClient.respond(connack, sizeof(connack));
+
+    PubSubClient client(server, 1883, callback, shimClient);
+    client.setSocketTimeout(1);  // bound the retry of the remainder
+    bool rc = client.connect("client_test1");
+    IS_TRUE(rc);
+
+    // Let the whole 9-byte header+topic out, then only 3 of the 7 payload bytes: the announced remaining
+    // length is already on the wire, so the broker would take the next packet as the rest of this payload.
+    shimClient.setWriteLimit(9 + 3);
+
+    rc = client.publish("topic", "payload");
+    IS_FALSE(rc);
+
+    IS_EQUAL(client.state(), MQTT_CONNECTION_LOST);
+    IS_FALSE(shimClient.connected());
+    IS_FALSE(client.connected());
+
+    END_IT
+}
+
 int main() {
     SUITE("Publish");
     test_publish();
@@ -537,6 +651,10 @@ int main() {
     test_publish_FlashStringHelper2();
     test_publish_P_FlashStringHelper();
     test_publish_P_P();
+    test_publish_completes_short_writes();
+    test_publish_nothing_written_keeps_connection();
+    test_publish_partial_write_header();
+    test_publish_partial_write_payload();
 
     FINISH
 }

@@ -629,10 +629,18 @@ bool PubSubClient::loop() {
         } else {
             _buffer[0] = MQTTPINGREQ;
             _buffer[1] = 0;
-            if (_client->write(_buffer, 2) == 2) {
+            if (writeToClient(_buffer, 2)) {
+                // Re-stamp both from t: writeToClient() set _lastOutActivity from a later millis() read of
+                // its own, and the ping schedule must not drift apart for what is a single event.
                 _lastInActivity = _lastOutActivity = t;
                 _pingOutstanding = true;
+            } else if (!connected()) {
+                // A half-written PINGREQ desyncs the stream like any other truncated packet, so
+                // writeToClient() closed the connection: do not fall through to the receive path.
+                return false;
             }
+            // Nothing written: the socket is still in sync, so leave _pingOutstanding alone and let a
+            // later loop() send the ping once the transmit window frees up.
         }
     }
     if (_rxBuffer) {
@@ -905,10 +913,9 @@ bool PubSubClient::beginPublishImpl(bool progmem, const char* topic, size_t plen
         uint8_t hdrLen = buildHeader(header, topicLen + nextMsgLen + plength);
         if (hdrLen == 0) return false;  // exit here in case of header generation failure
         // as the header length is variable, it starts at MQTT_MAX_HEADER_SIZE - hdrLen (see buildHeader() documentation)
-        size_t rc = _client->write(_buffer + (MQTT_MAX_HEADER_SIZE - hdrLen), hdrLen + topicLen + nextMsgLen);
-        if (rc != hdrLen + topicLen + nextMsgLen) return false;  // do not count a failed write as activity
-        _lastOutActivity = millis();
-        return true;
+        // writeToClient() completes a short write here: the announced remaining length is already on the wire,
+        // so a header left half sent makes the broker read this payload out of the next packet.
+        return writeToClient(_buffer + (MQTT_MAX_HEADER_SIZE - hdrLen), hdrLen + topicLen + nextMsgLen);
     }
     return false;
 }
@@ -976,6 +983,64 @@ size_t PubSubClient::write_P(const uint8_t* buf, size_t size) {
 }
 
 /**
+ * @brief  Write to the network client, completing a short write instead of abandoning the packet.
+ *
+ * A Client may accept fewer bytes than asked (a full transmit window, a timeout hit mid-record), and what that
+ * leaves behind depends on how far it got:
+ * - Nothing written: no byte of this packet reached the peer, so the stream is still correctly framed. Here a
+ *   short write is a transient send failure and nothing more.
+ * - Partially written: the fixed header already announced a remaining length, so the peer is now reading the
+ *   body of a packet whose tail never arrives and will take the next packet as its continuation. No later
+ *   packet can be parsed correctly; the stream is desynchronised for good.
+ * The second case is why the bytes that did go out must be followed by the rest: the packet is still in the
+ * caller's buffer and the count tells exactly how much is missing, so this retries the remainder (yielding
+ * between attempts) until the socket accepts it, the socket closes, or _socketTimeoutMillis runs out. The
+ * underlying Client has a timeout of its own, so that bound is what the caller tunes via setSocketTimeout().
+ *
+ * Only when the deadline expires with bytes already on the wire is the connection closed: a reconnect is the
+ * one way back in sync, and the alternative is worse than it looks — the next PINGREQ is swallowed by the same
+ * truncated packet, so the keepalive tears the connection down anyway, up to two keepalive intervals later,
+ * with every publish in between reported as sent and understood by nobody.
+ *
+ * @param  buf Bytes to write.
+ * @param  size Number of bytes to write.
+ * @return true if all size bytes were written (_lastOutActivity updated). false if they were not: with nothing
+ * written the connection is left alone (the caller just reports the failure), otherwise the connection is
+ * closed and _state is set to #MQTT_CONNECTION_LOST.
+ */
+bool PubSubClient::writeToClient(const uint8_t* buf, size_t size) {
+    if (!_client) return false;
+
+    size_t written = 0;
+    const unsigned long start = millis();
+
+    while (written < size) {
+        written += _client->write(buf + written, size - written);
+        if (written == size) break;
+        if (millis() - start >= _socketTimeoutMillis) break;
+        if (!_client->connected()) break;  // fail fast instead of retrying into a closed socket
+        PUBSUB_WAIT_YIELD();
+    }
+
+    if (written == size) {
+        _lastOutActivity = millis();
+        return true;
+    }
+
+    if (written == 0) {
+        // Stream still in sync: report the failure and keep the connection, so the caller can retry later
+        ERROR_PSC_PRINTF_P("writeToClient(): wrote no byte of %zu, connection kept\n", size);
+        return false;
+    }
+
+    ERROR_PSC_PRINTF_P("writeToClient(): wrote %zu of %zu bytes, closing connection to resynchronise\n", written, size);
+    _state = MQTT_CONNECTION_LOST;
+    _client->stop();
+    _pingOutstanding = false;
+    return false;
+}
+
+/**
  * @brief  Write a MQTT Control Packet (header and the prepared data) to the client / MQTT broker. The prepared data of size length must already be in the
  * internal _buffer starting at MQTT_MAX_HEADER_SIZE (space is needed for header generation).
  *
@@ -1006,23 +1071,18 @@ size_t PubSubClient::writeBuffer(size_t pos, size_t size) {
         bool result = true;
         while ((bytesRemaining > 0) && result) {
             size_t bytesToWrite = (bytesRemaining > MQTT_MAX_TRANSFER_SIZE) ? MQTT_MAX_TRANSFER_SIZE : bytesRemaining;
-            size_t bytesWritten = _client->write(writeBuf, bytesToWrite);
-            result = (bytesWritten == bytesToWrite);
-            bytesRemaining -= bytesWritten;
-            writeBuf += bytesWritten;
+            // writeToClient() completes a short chunk before giving up: the packet is split across chunks,
+            // so abandoning one mid-packet is the truncated-packet desync, not a lost chunk.
+            result = writeToClient(writeBuf, bytesToWrite);
             if (result) {
-                _lastOutActivity = millis();
+                bytesRemaining -= bytesToWrite;
+                writeBuf += bytesToWrite;
             }
-            yield();
+            PUBSUB_WAIT_YIELD();
         }
         rc = result ? size : 0;  // if result is false indicate a write error
 #else
-        rc = _client->write(_buffer + pos, size);
-        if (rc == size) {
-            _lastOutActivity = millis();
-        } else {
-            rc = 0;  // indicate a write error
-        }
+        rc = writeToClient(_buffer + pos, size) ? size : 0;  // 0 indicates a write error
 #endif
     }
     return rc;

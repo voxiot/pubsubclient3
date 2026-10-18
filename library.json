@@ -6,7 +6,7 @@
         "type": "git",
         "url": "https://github.com/voxiot/pubsubclient3.git"
     },
-    "version": "4.0.0",
+    "version": "4.0.1",
     "license": "MIT",
     "exclude": "tests",
     "examples": "examples/*/*.ino",
