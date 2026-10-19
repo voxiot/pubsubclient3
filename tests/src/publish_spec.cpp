@@ -31,6 +31,11 @@ int test_publish_completes_short_writes();
 int test_publish_nothing_written_keeps_connection();
 int test_publish_partial_write_header();
 int test_publish_partial_write_payload();
+int test_publish_zero_payload_write_after_header();
+int test_publish_zero_write_between_payload_buffers();
+#ifdef MQTT_MAX_TRANSFER_SIZE
+int test_control_packet_zero_write_after_chunk();
+#endif
 
 void callback(_UNUSED_ char* topic, _UNUSED_ uint8_t* payload, _UNUSED_ size_t plength) {
     // handle message arrived
@@ -630,6 +635,102 @@ int test_publish_partial_write_payload() {
     END_IT
 }
 
+int test_publish_zero_payload_write_after_header() {
+    IT("closes after a full PUBLISH header but zero payload bytes, then reconnects cleanly");
+    for (uint8_t qos = MQTT_QOS0; qos <= MQTT_QOS2; qos++) {
+        for (uint8_t progmem = 0; progmem < 2; progmem++) {
+            ShimClient shimClient;
+            byte connack[] = {0x20, 0x02, 0x00, 0x00};
+            shimClient.respond(connack, sizeof(connack));
+            PubSubClient client(server, 1883, callback, shimClient);
+            client.setSocketTimeout(1);
+            IS_TRUE(client.connect("client_test1"));
+
+            const uint16_t before = shimClient.received();
+            const uint16_t headerSize = (qos == MQTT_QOS0) ? 9 : 11;
+            shimClient.setWriteLimit(headerSize);  // accept the whole header, then block all payload writes
+            byte payload[] = {'p', 'a', 'y', 'l', 'o', 'a', 'd'};
+            bool rc = progmem ? client.publish_P("topic", payload, sizeof(payload), qos, false)
+                              : client.publish("topic", payload, sizeof(payload), qos, false);
+            IS_FALSE(rc);
+            IS_EQUAL(shimClient.received() - before, headerSize);
+            IS_EQUAL(client.state(), MQTT_CONNECTION_LOST);
+            IS_FALSE(shimClient.connected());
+            IS_FALSE(client.connected());
+            IS_FALSE(client.endPublish());
+
+            // Restoring transport capacity must not append another packet to the broken connection.
+            shimClient.setWriteLimit(1024);
+            const uint16_t stoppedAt = shimClient.received();
+            IS_FALSE(client.publish("topic", "next"));
+            IS_EQUAL(shimClient.received(), stoppedAt);
+
+            shimClient.respond(connack, sizeof(connack));
+            IS_TRUE(client.connect("client_test1"));
+            // No byte of the failed payload may leak into the new session.
+            byte publish[] = {0x30, 0x0b, 0x00, 0x05, 't', 'o', 'p', 'i', 'c', 'n', 'e', 'x', 't'};
+            shimClient.expect(publish, sizeof(publish));
+            const uint16_t reconnectedAt = shimClient.received();
+            IS_TRUE(client.publish("topic", "next"));
+            IS_EQUAL(shimClient.received() - reconnectedAt, sizeof(publish));
+            IS_FALSE(shimClient.error());
+        }
+    }
+    END_IT
+}
+
+int test_publish_zero_write_between_payload_buffers() {
+    IT("closes when a full payload buffer cannot send any byte, including after an earlier full buffer");
+    for (uint8_t qos = MQTT_QOS0; qos <= MQTT_QOS2; qos++) {
+        for (uint16_t acceptedPayload = 0; acceptedPayload <= 32; acceptedPayload += 32) {
+            ShimClient shimClient;
+            byte connack[] = {0x20, 0x02, 0x00, 0x00};
+            shimClient.respond(connack, sizeof(connack));
+            PubSubClient client(server, 1883, callback, shimClient);
+            IS_TRUE(client.setBufferSize(32));
+            client.setSocketTimeout(1);
+            IS_TRUE(client.connect("client_test1"));
+
+            byte payload[64];
+            memset(payload, 'x', sizeof(payload));
+            const uint16_t before = shimClient.received();
+            const uint16_t headerSize = (qos == MQTT_QOS0) ? 9 : 11;
+            shimClient.setWriteLimit(headerSize + acceptedPayload);
+            IS_TRUE(client.beginPublish("topic", sizeof(payload), qos, false));
+            IS_TRUE(client.write(payload, sizeof(payload)) < sizeof(payload));
+            IS_EQUAL(shimClient.received() - before, headerSize + acceptedPayload);
+            IS_EQUAL(client.state(), MQTT_CONNECTION_LOST);
+            IS_FALSE(shimClient.connected());
+            IS_FALSE(client.endPublish());
+        }
+    }
+    END_IT
+}
+
+#ifdef MQTT_MAX_TRANSFER_SIZE
+int test_control_packet_zero_write_after_chunk() {
+    IT("closes when a control packet sends a full transfer chunk but no byte of its next chunk");
+    ShimClient shimClient;
+    byte connack[] = {0x20, 0x02, 0x00, 0x00};
+    shimClient.respond(connack, sizeof(connack));
+    PubSubClient client(server, 1883, callback, shimClient);
+    IS_TRUE(client.setBufferSize(MQTT_MAX_TRANSFER_SIZE + 64));
+    client.setSocketTimeout(1);
+    IS_TRUE(client.connect("client_test1"));
+
+    char topic[MQTT_MAX_TRANSFER_SIZE + 1];
+    memset(topic, 't', sizeof(topic) - 1);
+    topic[sizeof(topic) - 1] = '\0';
+    const uint16_t before = shimClient.received();
+    shimClient.setWriteLimit(MQTT_MAX_TRANSFER_SIZE);
+    IS_FALSE(client.subscribe(topic, MQTT_QOS1));
+    IS_EQUAL(shimClient.received() - before, MQTT_MAX_TRANSFER_SIZE);
+    IS_EQUAL(client.state(), MQTT_CONNECTION_LOST);
+    IS_FALSE(shimClient.connected());
+    END_IT
+}
+#endif
+
 int main() {
     SUITE("Publish");
     test_publish();
@@ -655,6 +756,11 @@ int main() {
     test_publish_nothing_written_keeps_connection();
     test_publish_partial_write_header();
     test_publish_partial_write_payload();
+    test_publish_zero_payload_write_after_header();
+    test_publish_zero_write_between_payload_buffers();
+#ifdef MQTT_MAX_TRANSFER_SIZE
+    test_control_packet_zero_write_after_chunk();
+#endif
 
     FINISH
 }

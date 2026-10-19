@@ -265,9 +265,9 @@ class PubSubClient : public Print {
     bool readByte(uint8_t* result);
     bool readByte(uint8_t* result, size_t* pos);
     uint8_t buildHeader(uint8_t header, size_t length);
-    bool writeToClient(const uint8_t* buf, size_t size);
+    bool writeToClient(const uint8_t* buf, size_t size, bool packetStarted = false);
     bool writeControlPacket(uint8_t header, size_t length);
-    size_t writeBuffer(size_t pos, size_t size);
+    size_t writeBuffer(size_t pos, size_t size, bool packetStarted = false);
     size_t writeStringImpl(bool progmem, const char* string, size_t pos);
     size_t writeString(const char* string, size_t pos);
     size_t writeNextMsgId(size_t pos);

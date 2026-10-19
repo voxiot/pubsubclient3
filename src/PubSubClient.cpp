@@ -987,8 +987,8 @@ size_t PubSubClient::write_P(const uint8_t* buf, size_t size) {
  *
  * A Client may accept fewer bytes than asked (a full transmit window, a timeout hit mid-record), and what that
  * leaves behind depends on how far it got:
- * - Nothing written: no byte of this packet reached the peer, so the stream is still correctly framed. Here a
- *   short write is a transient send failure and nothing more.
+ * - Nothing written and no earlier part of this packet sent: the stream is still correctly framed.
+ *   A short write is a transient send failure and nothing more.
  * - Partially written: the fixed header already announced a remaining length, so the peer is now reading the
  *   body of a packet whose tail never arrives and will take the next packet as its continuation. No later
  *   packet can be parsed correctly; the stream is desynchronised for good.
@@ -997,18 +997,19 @@ size_t PubSubClient::write_P(const uint8_t* buf, size_t size) {
  * between attempts) until the socket accepts it, the socket closes, or _socketTimeoutMillis runs out. The
  * underlying Client has a timeout of its own, so that bound is what the caller tunes via setSocketTimeout().
  *
- * Only when the deadline expires with bytes already on the wire is the connection closed: a reconnect is the
+ * A failed write closes the connection if this call or an earlier part of the same packet sent bytes: a reconnect is the
  * one way back in sync, and the alternative is worse than it looks — the next PINGREQ is swallowed by the same
  * truncated packet, so the keepalive tears the connection down anyway, up to two keepalive intervals later,
  * with every publish in between reported as sent and understood by nobody.
  *
  * @param  buf Bytes to write.
  * @param  size Number of bytes to write.
- * @return true if all size bytes were written (_lastOutActivity updated). false if they were not: with nothing
- * written the connection is left alone (the caller just reports the failure), otherwise the connection is
+ * @param  packetStarted True if an earlier part of this MQTT packet was already sent (e.g. the PUBLISH header).
+ * @return true if all size bytes were written (_lastOutActivity updated). false if they were not: if no part
+ * of the packet was sent the connection is left alone, otherwise the connection is
  * closed and _state is set to #MQTT_CONNECTION_LOST.
  */
-bool PubSubClient::writeToClient(const uint8_t* buf, size_t size) {
+bool PubSubClient::writeToClient(const uint8_t* buf, size_t size, bool packetStarted) {
     if (!_client) return false;
 
     size_t written = 0;
@@ -1027,13 +1028,14 @@ bool PubSubClient::writeToClient(const uint8_t* buf, size_t size) {
         return true;
     }
 
-    if (written == 0) {
-        // Stream still in sync: report the failure and keep the connection, so the caller can retry later
+    if ((written == 0) && !packetStarted) {
+        // No part of this packet was sent: a later packet can still start at a valid boundary.
         ERROR_PSC_PRINTF_P("writeToClient(): wrote no byte of %zu, connection kept\n", size);
         return false;
     }
 
-    ERROR_PSC_PRINTF_P("writeToClient(): wrote %zu of %zu bytes, closing connection to resynchronise\n", written, size);
+    ERROR_PSC_PRINTF_P("writeToClient(): wrote %zu of %zu bytes (packetStarted=%u), closing connection to resynchronise\n",
+                       written, size, (unsigned int)packetStarted);
     _state = MQTT_CONNECTION_LOST;
     _client->stop();
     _pingOutstanding = false;
@@ -1060,9 +1062,10 @@ bool PubSubClient::writeControlPacket(uint8_t header, size_t length) {
  *
  * @param  pos Position in the _buffer to start writing from.
  * @param  size Number of bytes to write from the _buffer.
+ * @param  packetStarted True if an earlier part of the same MQTT packet was already sent.
  * @return Number of bytes written to the client / MQTT broker (0 .. bufferSize). If 0 is returned a write error occurred or buffer index error.
  */
-size_t PubSubClient::writeBuffer(size_t pos, size_t size) {
+size_t PubSubClient::writeBuffer(size_t pos, size_t size, bool packetStarted) {
     size_t rc = 0;
     if (_client && (size > 0) && (pos + size <= _bufferSize)) {
 #ifdef MQTT_MAX_TRANSFER_SIZE
@@ -1073,7 +1076,7 @@ size_t PubSubClient::writeBuffer(size_t pos, size_t size) {
             size_t bytesToWrite = (bytesRemaining > MQTT_MAX_TRANSFER_SIZE) ? MQTT_MAX_TRANSFER_SIZE : bytesRemaining;
             // writeToClient() completes a short chunk before giving up: the packet is split across chunks,
             // so abandoning one mid-packet is the truncated-packet desync, not a lost chunk.
-            result = writeToClient(writeBuf, bytesToWrite);
+            result = writeToClient(writeBuf, bytesToWrite, packetStarted || (bytesRemaining < size));
             if (result) {
                 bytesRemaining -= bytesToWrite;
                 writeBuf += bytesToWrite;
@@ -1082,7 +1085,7 @@ size_t PubSubClient::writeBuffer(size_t pos, size_t size) {
         }
         rc = result ? size : 0;  // if result is false indicate a write error
 #else
-        rc = writeToClient(_buffer + pos, size) ? size : 0;  // 0 indicates a write error
+        rc = writeToClient(_buffer + pos, size, packetStarted) ? size : 0;  // 0 indicates a write error
 #endif
     }
     return rc;
@@ -1177,7 +1180,8 @@ size_t PubSubClient::appendBuffer(uint8_t data) {
 size_t PubSubClient::flushBuffer() {
     size_t rc = 0;
     if (connected()) {
-        rc = writeBuffer(0, _bufferWritePos);
+        // Payload continues a PUBLISH whose header was already sent by beginPublishImpl().
+        rc = writeBuffer(0, _bufferWritePos, true);
     }
     _bufferWritePos = 0;
     return rc;
