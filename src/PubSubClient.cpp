@@ -988,7 +988,7 @@ size_t PubSubClient::write_P(const uint8_t* buf, size_t size) {
  * A Client may accept fewer bytes than asked (a full transmit window, a timeout hit mid-record), and what that
  * leaves behind depends on how far it got:
  * - Nothing written and no earlier part of this packet sent: the stream is still correctly framed.
- *   A short write is a transient send failure and nothing more.
+ *   Return immediately if the first write accepts zero bytes; the caller can retry on a later loop.
  * - Partially written: the fixed header already announced a remaining length, so the peer is now reading the
  *   body of a packet whose tail never arrives and will take the next packet as its continuation. No later
  *   packet can be parsed correctly; the stream is desynchronised for good.
@@ -1018,6 +1018,11 @@ bool PubSubClient::writeToClient(const uint8_t* buf, size_t size, bool packetSta
     while (written < size) {
         written += _client->write(buf + written, size - written);
         if (written == size) break;
+        if ((written == 0) && !packetStarted) {
+            // No part of this packet was sent: a later packet can still start at a valid boundary.
+            ERROR_PSC_PRINTF_P("writeToClient(): wrote no byte of %zu, connection kept\n", size);
+            return false;
+        }
         if (millis() - start >= _socketTimeoutMillis) break;
         if (!_client->connected()) break;  // fail fast instead of retrying into a closed socket
         PUBSUB_WAIT_YIELD();
@@ -1028,14 +1033,7 @@ bool PubSubClient::writeToClient(const uint8_t* buf, size_t size, bool packetSta
         return true;
     }
 
-    if ((written == 0) && !packetStarted) {
-        // No part of this packet was sent: a later packet can still start at a valid boundary.
-        ERROR_PSC_PRINTF_P("writeToClient(): wrote no byte of %zu, connection kept\n", size);
-        return false;
-    }
-
-    ERROR_PSC_PRINTF_P("writeToClient(): wrote %zu of %zu bytes (packetStarted=%u), closing connection to resynchronise\n",
-                       written, size, (unsigned int)packetStarted);
+    ERROR_PSC_PRINTF_P("writeToClient(): wrote %zu of %zu bytes (packetStarted=%u), closing connection to resynchronise\n", written, size, (unsigned int)packetStarted);
     _state = MQTT_CONNECTION_LOST;
     _client->stop();
     _pingOutstanding = false;

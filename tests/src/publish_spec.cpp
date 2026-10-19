@@ -555,27 +555,48 @@ int test_publish_completes_short_writes() {
 }
 
 int test_publish_nothing_written_keeps_connection() {
-    IT("keeps the connection when the publish write places no byte at all");
-    ShimClient shimClient;
+    IT("returns after one zero-byte write, keeps the connection and allows a later publish");
+    class WriteCountingClient : public ShimClient {
+       public:
+        using ShimClient::write;
+        size_t writeCalls = 0;
+        size_t write(const uint8_t* buf, size_t size) override {
+            ++writeCalls;
+            return ShimClient::write(buf, size);
+        }
+    };
+    WriteCountingClient shimClient;
     shimClient.setAllowConnect(true);
 
     byte connack[] = {0x20, 0x02, 0x00, 0x00};
     shimClient.respond(connack, sizeof(connack));
 
     PubSubClient client(server, 1883, callback, shimClient);
-    client.setSocketTimeout(1);  // keep the retry window short; the deadline is reached either way
+    client.setSocketTimeout(2);  // zero-byte first writes must return without retrying up to this deadline
     bool rc = client.connect("client_test1");
     IS_TRUE(rc);
 
     // The socket accepts nothing from here on. No byte of the packet reached the broker, so the stream is
     // still correctly framed: the publish fails, but tearing the connection down would be gratuitous.
     shimClient.setWriteLimit(0);
+    const size_t callsBefore = shimClient.writeCalls;
+    const uint16_t bytesBefore = shimClient.received();
 
     rc = client.publish("topic", "payload");
     IS_FALSE(rc);
-
+    // Count calls rather than wall-clock time: retrying until the timeout must fail this test.
+    IS_EQUAL(shimClient.writeCalls - callsBefore, 1);
+    IS_EQUAL(shimClient.received(), bytesBefore);
     IS_EQUAL(client.state(), MQTT_CONNECTED);
+    IS_TRUE(shimClient.connected());
     IS_TRUE(client.connected());
+
+    shimClient.setWriteLimit(1024);
+    byte publish[] = {0x30, 0x0e, 0x00, 0x05, 't', 'o', 'p', 'i', 'c', 'p', 'a', 'y', 'l', 'o', 'a', 'd'};
+    shimClient.expect(publish, sizeof(publish));
+    IS_TRUE(client.publish("topic", "payload"));
+    IS_EQUAL(shimClient.received() - bytesBefore, sizeof(publish));
+    IS_FALSE(shimClient.error());
 
     END_IT
 }

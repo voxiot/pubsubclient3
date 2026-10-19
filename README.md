@@ -65,6 +65,8 @@ A PUBLISH can require several network writes: `beginPublish()` sends the MQTT he
 
 For example, `publish("topic", "payload")` at QoS 0 sends a nine-byte header/topic prefix followed by seven payload bytes. If all nine prefix bytes are accepted and none of the payload can be sent, v4.0.2 closes the connection. Another publication cannot be appended to that incomplete packet; the application must reconnect before publishing again. Pending payload data is discarded rather than reused after reconnection. This does not add automatic message retransmission or prove broker delivery.
 
+If the first transport write accepts zero bytes and no part of the packet was sent, the operation returns failure immediately without retrying until the socket timeout. The application can retry on a later loop. This avoids an extra library retry loop; the underlying `Client::write()` call can still block according to its own transport behavior. Writes that continue an already-started packet retain the existing retry timeout and disconnect on an incomplete send.
+
 The fix covers `publish()`, `publish_P()`, the `beginPublish()` / `write()` / `endPublish()` flow, QoS 0/1/2, payloads larger than the buffer, and chunked writes. It preserves the public API and existing `setSocketTimeout()` retry deadline, and adds no per-instance fields, buffers or dynamic allocations.
 
 `setOversizedPolicy()` controls **incoming oversized packets only**. It does not control outgoing transmission failures: once a packet has started, abandoning its remaining bytes requires closing the connection to restore framing on a new connection.
