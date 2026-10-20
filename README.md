@@ -14,7 +14,18 @@ Starting with **v4.0.0**, this repository (`voxiot/pubsubclient3`) **diverges** 
 > [!IMPORTANT]
 > **Diverged fork.** Based on upstream `hmueller01/pubsubclient3 v3.3.2`, independently versioned from **v4.0.0** onward.
 >
-> We no longer track upstream version-for-version. Upstream changes are reviewed individually and cherry-picked only when they make sense for this fork. Existing method signatures are preserved; copying an owning PubSubClient is now explicitly disabled (see the unreleased safety fixes below). Optional v4 resilience features are **opt-in**; the oversized-packet default and outgoing-write safety fixes apply automatically (see below).
+> We no longer track upstream version-for-version. Upstream changes are reviewed individually and cherry-picked only when they make sense for this fork. Existing method signatures are preserved; copying an owning PubSubClient is now explicitly disabled (see the v5.0.0 safety fixes below). Optional v4 resilience features are **opt-in**; the oversized-packet default and outgoing-write safety fixes apply automatically (see below).
+
+## Why version 5.0.0? Migration from v4
+
+Version **5.0.0** is a major release because the packet and session integrity fixes intentionally break two previously accepted usage patterns. Although existing method signatures are preserved, this is not a fully backward-compatible patch:
+
+- **Client copying is prohibited.** Copy construction and copy assignment are deleted because they duplicated owning pointers and could cause double frees. Pass `PubSubClient` by reference or pointer; create and configure a separate instance when an independent client is needed.
+- **Manual publishing is an explicit packet transaction.** Every successful `beginPublish()` must be followed by exactly the announced number of payload bytes and `endPublish()`, including for an empty payload. `write()` outside a transaction returns zero; a write exceeding the remaining payload is rejected in full. Ending with missing bytes closes the connection with `MQTT_CONNECTION_LOST`.
+
+While a manual publish is active, `loop()` checks the connection but defers receive and keepalive processing; nested publishes, subscribe/unsubscribe, reconnect and buffer changes are refused. Finish the transaction promptly, and finish a manual publish started inside a callback before returning. Buffer changes and reconnect are also refused for the callback's lifetime. These restrictions prevent other MQTT packets from becoming bytes of an unfinished payload and prevent access to invalidated buffers.
+
+Applications that already keep clients by reference/pointer and complete each manual publish normally require no changes for these two migration points. The release also resets parser state across connections, validates lengths and identifiers, and tracks incoming QoS 2 duplicates. These fixes apply to both blocking and incremental receive; incremental receive remains opt-in. See [CHANGELOG.md](CHANGELOG.md) and the v5 safety details below.
 
 ## Resilience and non-blocking operation (v4)
 
@@ -75,7 +86,7 @@ The fix covers `publish()`, `publish_P()`, the `beginPublish()` / `write()` / `e
 
 Regression coverage is in `tests/src/publish_spec.cpp`, including zero-byte payload failures after a complete header, failures between payload buffers and transfer chunks, blocked subsequent publishes, and clean reconnection. The chunk-specific case is enabled when the test executable and library are compiled with `MQTT_MAX_TRANSFER_SIZE` defined (for example, `4`).
 
-### Session and packet safety (unreleased)
+### Session and packet safety (v5.0.0)
 
 These fixes apply to blocking and incremental receive. They do not change the application's network/OFFLINE policy or the existing socket timeout.
 

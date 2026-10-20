@@ -1,5 +1,7 @@
 # Changelog
 
+**English** | [Português (Brasil)](CHANGELOG.pt-BR.md)
+
 All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to
@@ -7,14 +9,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+## [5.0.0] - 2026-10-20
+
+### Changed
+
+- **Major version bump from 4.0.3:** packet and session integrity fixes introduce intentional source and behavioral incompatibilities, so this release is not classified as a backward-compatible patch. Existing method signatures are preserved, but copying clients and permissive manual publishing are no longer supported.
+- Delete `PubSubClient` copy construction and copy assignment to prevent shared ownership of internal pointers and double frees. Migrate consumers to references/pointers, or explicitly construct and configure independent clients.
+- Require a complete `beginPublish()` / `write()` / `endPublish()` transaction, including `endPublish()` for an empty payload. Reject writes outside a transaction and writes exceeding the remaining payload; close with `MQTT_CONNECTION_LOST` when ending an incomplete payload. During an active transaction, defer RX/keepalive and refuse overlapping operations. A callback must finish its manual publish before returning.
+- Refuse buffer changes and reconnect during callbacks, and ignore endpoint/transport/stream changes during callbacks or manual publishing, to preserve active buffer lifetime and packet boundaries. Consumers relying on these operations must move them outside the active operation.
+
 ### Fixed
 
+- Reset parser state on close and reconnect; close interrupted blocking reads; validate packet identifiers, topic lengths and size arithmetic; honor the incoming IGNORE limit; and suppress duplicate incoming QoS 2 callback delivery, retaining pending identifiers only for a confirmed persistent session with matching identity.
 - Complete a short outgoing write instead of abandoning the packet: a `Client` that accepts fewer bytes than asked (full transmit window, timeout mid-record) left a truncated packet on the wire, and since its fixed header had already announced a remaining length, the peer took the following packet as its continuation — an undetected desync that no later packet recovers from, while the connection kept looking healthy. The remainder is now retried (yielding between attempts) until the socket takes it, the socket closes, or `setSocketTimeout()` runs out. Covers `writeBuffer()` (CONNECT/SUBSCRIBE/UNSUBSCRIBE and the `endPublish()` flush, both the plain and the `MQTT_MAX_TRANSFER_SIZE` chunked branch), the `beginPublish()` header/topic write, and the `PINGREQ` sent from `loop()`
 - Force a clean reconnect only when the deadline expires with bytes already on the wire, where a reconnect is the one way back in sync (and the alternative merely postpones it: the next `PINGREQ` is swallowed by the truncated packet, so the keepalive tears the connection down up to two keepalive intervals later, with every publish in between reported as sent). A write that placed **no** byte leaves the stream correctly framed, so it keeps the connection and only reports the failure, as before
 - Yield cooperatively with the platform-aware `PUBSUB_WAIT_YIELD()` in the `MQTT_MAX_TRANSFER_SIZE` write loop, which still used a plain `yield()` (a no-op for watchdog purposes on ESP32/FreeRTOS, where only blocking for a tick hands the CPU over)
 
 ### Tests
 
+- Add `resilience_spec` for callback lifetime, ownership, parser recovery, manual publishing, limits and QoS 2 sessions in both receive modes where applicable; correct packet expectations and use `size_t` counters in the mock transport.
 - `publish_spec`: a publish whose every write is short still delivers the exact same bytes; a write that places nothing fails the publish but keeps the connection; a partial write of the header, and of the payload, each close the connection (`MQTT_CONNECTION_LOST`). `connect_spec`: a partial CONNECT write fails the connect and closes the socket
 - `ShimClient`: `setWriteLimit()` simulates a socket that stops accepting bytes, `setWriteChunk()` one that accepts only a few bytes per call
 

@@ -13,7 +13,18 @@ A partir da **v4.0.0**, este repositório (`voxiot/pubsubclient3`) **segue uma l
 > [!IMPORTANT]
 > **Fork independente.** Baseado em `hmueller01/pubsubclient3 v3.3.2`, com versionamento próprio a partir da **v4.0.0**.
 >
-> Não acompanhamos mais cada versão do projeto de origem. As alterações são avaliadas individualmente e incorporadas apenas quando fazem sentido para este fork. As assinaturas dos métodos existentes são preservadas; copiar um PubSubClient que possui recursos agora é explicitamente proibido (veja as correções de segurança operacional ainda não lançadas abaixo). Os recursos opcionais de resiliência da v4 precisam ser habilitados explicitamente. O comportamento padrão para pacotes grandes demais e as correções de escrita de saída são aplicados automaticamente.
+> Não acompanhamos mais cada versão do projeto de origem. As alterações são avaliadas individualmente e incorporadas apenas quando fazem sentido para este fork. As assinaturas dos métodos existentes são preservadas; copiar um PubSubClient que possui recursos agora é explicitamente proibido (veja as correções de integridade da v5.0.0 abaixo). Os recursos opcionais de resiliência da v4 precisam ser habilitados explicitamente. O comportamento padrão para pacotes grandes demais e as correções de escrita de saída são aplicados automaticamente.
+
+## Por que a versão 5.0.0? Migração da v4
+
+A versão **5.0.0** é uma versão major porque as correções de integridade de pacotes e sessões tornam incompatíveis dois padrões de uso anteriormente aceitos. Embora as assinaturas dos métodos existentes sejam preservadas, esta atualização não é um patch totalmente compatível com as versões anteriores:
+
+- **A cópia de clientes foi proibida.** O construtor de cópia e a atribuição por cópia foram excluídos porque duplicavam ponteiros proprietários e poderiam causar liberação duplicada de memória. Passe `PubSubClient` por referência ou ponteiro; crie e configure outra instância quando precisar de um cliente independente.
+- **A publicação manual é uma transação explícita de pacote.** Todo `beginPublish()` bem-sucedido deve ser seguido de exatamente a quantidade anunciada de bytes de payload e de `endPublish()`, inclusive para um payload vazio. `write()` fora de uma transação retorna zero; uma escrita maior que o payload restante é rejeitada integralmente. Finalizar com bytes faltando encerra a conexão com `MQTT_CONNECTION_LOST`.
+
+Durante uma publicação manual, `loop()` verifica a conexão, mas adia a recepção e o keepalive; publicações aninhadas, subscribe/unsubscribe, reconexão e alterações de buffer são recusados. Conclua a transação prontamente e finalize uma publicação manual iniciada dentro de um callback antes de retornar. Alterações de buffer e reconexão também são recusadas durante toda a execução do callback. Essas restrições impedem que outros pacotes MQTT se tornem bytes de um payload incompleto e evitam acessos a buffers invalidados.
+
+Aplicações que já mantêm clientes por referência/ponteiro e concluem cada publicação manual normalmente não precisam de ajustes nesses dois pontos de migração. A versão também reinicia o estado do parser entre conexões, valida tamanhos e identificadores e controla duplicatas de QoS 2 recebido. As correções se aplicam à recepção bloqueante e à incremental; a recepção incremental continua dependendo de habilitação explícita. Veja [CHANGELOG.md](CHANGELOG.md) e os detalhes das correções da v5 abaixo.
 
 ## Resiliência e operação não bloqueante (v4)
 
@@ -74,7 +85,7 @@ A correção abrange `publish()`, `publish_P()`, o fluxo `beginPublish()` / `wri
 
 A cobertura de regressão está em `tests/src/publish_spec.cpp`, incluindo falhas de payload com zero bytes após um cabeçalho completo, falhas entre buffers de payload e blocos de transferência, bloqueio de publicações posteriores e reconexão sem resíduos do pacote anterior. O caso específico de blocos é habilitado quando o executável de teste e a biblioteca são compilados com `MQTT_MAX_TRANSFER_SIZE` definido, por exemplo, como `4`.
 
-### Integridade de sessões e pacotes (ainda não lançado)
+### Integridade de sessões e pacotes (v5.0.0)
 
 Estas correções se aplicam à recepção bloqueante e à incremental. Não alteram a política de rede/OFFLINE da aplicação nem o timeout existente do socket.
 
