@@ -577,11 +577,12 @@ bool PubSubClient::handlePacket(uint8_t* buf, size_t bufSize, uint8_t hdrLen, si
             // MQTT Publish Release (QoS 2 publisher handshake, part 2): See section 3.6 MQTT v3.1.1 protocol specification
             buf[0] = MQTTPUBREL | 2;  // PUBREL fixed header: bit 1 must be set per spec
             // bytes 1-3 of PUBREL are the same as of PUBREC (remaining length + msgId)
-            if (_client->write(buf, 4) != 4) {
+            if (!writeToClient(buf, 4)) {
                 ERROR_PSC_PRINTF_P("handlePacket(): failed to write PUBREL\n");
+                // A required control response cannot be dropped, even if no byte was sent.
+                if (_state == MQTT_CONNECTED) closeConnection(MQTT_CONNECTION_LOST);
                 return false;
             }
-            _lastOutActivity = millis();
             break;
         case MQTTPUBREL:
             // MQTT Publish Release (QoS 2 subscriber handshake, part 2): broker releases the message to us.
@@ -600,11 +601,12 @@ bool PubSubClient::handlePacket(uint8_t* buf, size_t bufSize, uint8_t hdrLen, si
             // MQTT Publish Complete (QoS 2 subscriber handshake, part 3): See section 3.7 MQTT v3.1.1 protocol specification
             buf[0] = MQTTPUBCOMP;
             // bytes 1-3 of PUBCOMP are the same as of PUBREL (remaining length + msgId)
-            if (_client->write(buf, 4) != 4) {
+            if (!writeToClient(buf, 4)) {
                 ERROR_PSC_PRINTF_P("handlePacket(): failed to write PUBCOMP\n");
+                // A required control response cannot be dropped, even if no byte was sent.
+                if (_state == MQTT_CONNECTED) closeConnection(MQTT_CONNECTION_LOST);
                 return false;
             }
-            _lastOutActivity = millis();
             break;
         case MQTTPUBCOMP:
             // MQTT Publish Complete (QoS 2 publisher handshake, part 3): broker confirms delivery of our QoS 2 PUBLISH.
@@ -619,11 +621,12 @@ bool PubSubClient::handlePacket(uint8_t* buf, size_t bufSize, uint8_t hdrLen, si
             // MQTT Ping Request: See section 3.12 MQTT v3.1.1 protocol specification
             buf[0] = MQTTPINGRESP;
             buf[1] = 0;
-            if (_client->write(buf, 2) != 2) {
+            if (!writeToClient(buf, 2)) {
                 ERROR_PSC_PRINTF_P("handlePacket(): failed to write PINGRESP\n");
+                // A required control response cannot be dropped, even if no byte was sent.
+                if (_state == MQTT_CONNECTED) closeConnection(MQTT_CONNECTION_LOST);
                 return false;
             }
-            _lastOutActivity = millis();
             break;
         case MQTTPINGRESP:
             _pingOutstanding = false;
@@ -1400,7 +1403,7 @@ PubSubClient& PubSubClient::setKeepAlive(uint16_t keepAlive) {
 }
 
 PubSubClient& PubSubClient::setSocketTimeout(uint16_t timeout) {
-    _socketTimeoutMillis = timeout * 1000UL;
+    _socketTimeoutMillis = (timeout ? timeout : MQTT_SOCKET_TIMEOUT) * 1000UL;
     return *this;
 }
 

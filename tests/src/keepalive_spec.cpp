@@ -1,5 +1,3 @@
-#include <unistd.h>
-
 #include "BDDTest.h"
 #include "Buffer.h"
 #include "PubSubClient.h"
@@ -21,7 +19,7 @@ void callback(_UNUSED_ char* topic, _UNUSED_ uint8_t* payload, _UNUSED_ size_t p
 }
 
 int test_keepalive_pings_idle() {
-    IT("keeps an idle connection alive (takes 1 minute)");
+    IT("keeps an idle connection alive");
 
     ShimClient shimClient;
     shimClient.setAllowConnect(true);
@@ -39,7 +37,7 @@ int test_keepalive_pings_idle() {
     shimClient.respond(pingresp, 2);
 
     for (int i = 0; i < 50; i++) {
-        sleep(1);
+        setTestMillis(peekTestMillis() + 1000UL, 0);
         if (i == 15 || i == 31 || i == 47) {
             shimClient.expect(pingreq, 2);
             shimClient.respond(pingresp, 2);
@@ -54,7 +52,7 @@ int test_keepalive_pings_idle() {
 }
 
 int test_keepalive_pings_with_outbound_qos0() {
-    IT("keeps a connection alive that only sends QoS 0 (takes 1 minute)");
+    IT("keeps a connection alive that only sends QoS 0");
 
     ShimClient shimClient;
     shimClient.setAllowConnect(true);
@@ -74,7 +72,7 @@ int test_keepalive_pings_with_outbound_qos0() {
         rc = client.publish("topic", "payload");
         IS_TRUE(rc);
         IS_FALSE(shimClient.error());
-        sleep(1);
+        setTestMillis(peekTestMillis() + 1000UL, 0);
         if (i == 15 || i == 31 || i == 47) {
             byte pingreq[] = {0xC0, 0x0};
             shimClient.expect(pingreq, 2);
@@ -90,7 +88,7 @@ int test_keepalive_pings_with_outbound_qos0() {
 }
 
 int test_keepalive_pings_with_inbound_qos0() {
-    IT("keeps a connection alive that only receives QoS 0 (takes 1 minute)");
+    IT("keeps a connection alive that only receives QoS 0");
 
     ShimClient shimClient;
     shimClient.setAllowConnect(true);
@@ -106,7 +104,7 @@ int test_keepalive_pings_with_inbound_qos0() {
 
     for (int i = 0; i < 50; i++) {
         TRACE(i << ":");
-        sleep(1);
+        setTestMillis(peekTestMillis() + 1000UL, 0);
         if (i == 15 || i == 31 || i == 47) {
             byte pingreq[] = {0xC0, 0x0};
             shimClient.expect(pingreq, 2);
@@ -123,7 +121,7 @@ int test_keepalive_pings_with_inbound_qos0() {
 }
 
 int test_keepalive_no_pings_inbound_qos1() {
-    IT("does not send pings for connections with inbound QoS 1 (takes 1 minute)");
+    IT("does not send pings for connections with inbound QoS 1");
 
     ShimClient shimClient;
     shimClient.setAllowConnect(true);
@@ -141,7 +139,7 @@ int test_keepalive_no_pings_inbound_qos1() {
     for (int i = 0; i < 50; i++) {
         shimClient.respond(publish, 18);
         shimClient.expect(puback, 4);
-        sleep(1);
+        setTestMillis(peekTestMillis() + 1000UL, 0);
         rc = client.loop();
         IS_TRUE(rc);
         IS_FALSE(shimClient.error());
@@ -151,7 +149,7 @@ int test_keepalive_no_pings_inbound_qos1() {
 }
 
 int test_keepalive_disconnects_hung() {
-    IT("disconnects a hung connection (takes 30 seconds)");
+    IT("disconnects a hung connection");
 
     ShimClient shimClient;
     shimClient.setAllowConnect(true);
@@ -167,7 +165,7 @@ int test_keepalive_disconnects_hung() {
     shimClient.expect(pingreq, 2);
 
     for (int i = 0; i < 32; i++) {
-        sleep(1);
+        setTestMillis(peekTestMillis() + 1000UL, 0);
         rc = client.loop();
     }
     IS_FALSE(rc);
@@ -182,11 +180,14 @@ int test_keepalive_disconnects_hung() {
 
 int main() {
     SUITE("Keep-alive");
+    // Advance simulated seconds explicitly; host scheduling must not determine ping timing.
+    setTestMillis(100000UL, 0);
     test_keepalive_pings_idle();
     test_keepalive_pings_with_outbound_qos0();
     test_keepalive_pings_with_inbound_qos0();
     test_keepalive_no_pings_inbound_qos1();
     test_keepalive_disconnects_hung();
 
+    resetTestMillis();
     FINISH
 }

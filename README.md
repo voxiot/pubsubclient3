@@ -47,6 +47,8 @@ Optional features below preserve the classic defaults. An oversized incoming pac
   client.setPacketTimeout(10);  // 0 (default) = fall back to the socket timeout
   ```
 
+  The socket timeout defaults to **15 seconds**. `setSocketTimeout(2)` selects two seconds; `setSocketTimeout(0)` restores `MQTT_SOCKET_TIMEOUT`, including any compile-time override. Unlike earlier versions, zero no longer selects immediate expiry and never means an infinite wait. `MQTT_SOCKET_TIMEOUT` must be between 1 and 65535 seconds, checked by `static_assert`. `setPacketTimeout(0)` still falls back to the effective socket timeout. These are library deadlines, not a guarantee that underlying TCP/TLS calls cannot block longer. Wait loops yield to the platform; a longer timeout can still delay application work even when the watchdog is serviced.
+
 - **Oversized-packet policy.** When an incoming packet does not fit the buffer:
 
   ```c
@@ -115,6 +117,12 @@ The initial-zero-write fast failure and retry deadline for an already-started pa
 
 Regression coverage: `tests/src/resilience_spec.cpp`, executed by `make test`, covers the ten fixes in both receive modes where applicable, wire ordering, reconnection, persistent-session identity and QoS 2 capacity. The mock transport uses `size_t` counters for array traversal so a legal 65535-byte topic cannot wrap its write loop. Run the suite again with `MQTT_MAX_TRANSFER_SIZE=4` and with AddressSanitizer for chunk boundaries and memory lifetime checks.
 
+### Control responses and configuration checks
+
+PUBREL, PUBCOMP and PINGRESP use the same short-write completion helper as outgoing packets. A recoverable partial write completes within the socket timeout. If completion fails, the connection closes with `MQTT_CONNECTION_LOST`. If the first write accepts zero bytes, these required responses close the connection immediately, without retrying until the timeout. This preserves their failure policy while avoiding reconnects for recoverable short writes.
+
+`make test` also runs `tests/check_config.py` to check accepted and rejected compile-time limits; it uses Python 3's standard library and the configured C++ compiler. Run it separately from `tests/` with `make config-test` or `python3 check_config.py --compiler g++`. Runtime regressions are in `resilience_spec.cpp`, including both receive modes, exact response bytes, zero-write call counts, timeout fallback and QoS 2 slot reuse. A scoped host-only clock exercises deadlines without long real waits. The keepalive suite also advances simulated seconds explicitly so host scheduling cannot shift expected ping times; other suites retain their existing clock behavior. Repeat the suite with `MQTT_RX_QOS2_MAX_INFLIGHT=4`, `MQTT_SOCKET_TIMEOUT=1`, and `MQTT_MAX_TRANSFER_SIZE=4` (each definition must also apply to the library).
+
 ## Examples
 
 The library comes with a number of example sketches. See File > Examples > PubSubClient
@@ -125,6 +133,7 @@ Full API documentation is available here: https://hmueller01.github.io/pubsubcli
 ## Limitations
 
  - The client is based on the [MQTT Version 3.1.1 specification](https://docs.oasis-open.org/mqtt/mqtt/v3.1.1/os/mqtt-v3.1.1-os.html) with some limitations.
+ - Incoming QoS 2 tracking defaults to **one pending identifier** (`MQTT_RX_QOS2_MAX_INFLIGHT=1`). A new distinct identifier arriving while all slots are occupied closes the connection before callback delivery or PUBREC; a duplicate does not consume another slot. PUBREL releases its slot. If concurrent QoS 2 deliveries are expected, define `MQTT_RX_QOS2_MAX_INFLIGHT=4`, for example, consistently for library and application. The identifier array costs `2 * N` bytes per client (four slots add six bytes over the default). A `static_assert` accepts 1 through 65535 slots; this protocol bound does not guarantee that a chosen array fits device RAM.
  - It can publish at QoS 0 and since [v3.2.0](https://github.com/hmueller01/pubsubclient3/releases/tag/v3.2.0) also at QoS 1 or 2.
 
    **WARNING:** No retransmission is supported to keep the library as much memory friendly as possible.

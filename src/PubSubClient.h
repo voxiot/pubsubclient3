@@ -94,6 +94,8 @@
 #ifndef MQTT_SOCKET_TIMEOUT
 #define MQTT_SOCKET_TIMEOUT 15
 #endif
+static_assert(MQTT_SOCKET_TIMEOUT >= 1 && MQTT_SOCKET_TIMEOUT <= 65535,
+              "MQTT_SOCKET_TIMEOUT must be between 1 and 65535 seconds");
 
 /**
  * @brief Sets the maximum number of bytes passed to the network client in each write call.
@@ -214,7 +216,8 @@
 #ifndef MQTT_RX_QOS2_MAX_INFLIGHT
 #define MQTT_RX_QOS2_MAX_INFLIGHT 1
 #endif
-static_assert(MQTT_RX_QOS2_MAX_INFLIGHT > 0, "At least one incoming QoS 2 slot is required");
+static_assert(MQTT_RX_QOS2_MAX_INFLIGHT >= 1 && MQTT_RX_QOS2_MAX_INFLIGHT <= 65535,
+              "MQTT_RX_QOS2_MAX_INFLIGHT must be between 1 and 65535");
 
 /**
  * @class PubSubClient
@@ -487,7 +490,10 @@ class PubSubClient : public Print {
      * @brief Sets the socket timeout used by the client.
      * This determines how long the client will wait for incoming data when it expects data to arrive - for example,
      * whilst it is in the middle of reading a MQTT packet.
-     * @param timeout The socket timeout, in seconds.
+     * @param timeout The socket timeout, in seconds. Zero restores MQTT_SOCKET_TIMEOUT
+     * (15 seconds unless overridden at compile time); it never means an infinite wait.
+     * This also bounds library retries for an already-started outgoing packet.
+     * Underlying transport calls may have their own blocking behavior.
      * @return The client instance, allowing the function to be chained.
      */
     PubSubClient& setSocketTimeout(uint16_t timeout);

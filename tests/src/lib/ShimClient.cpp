@@ -7,8 +7,25 @@
 
 #include "trace.h"
 
+namespace {
+bool testClockEnabled = false;
+unsigned long testClockValue = 0;
+unsigned long testClockStep = 0;
+}
 extern "C" {
+void setTestMillis(unsigned long value, unsigned long step) {
+    testClockEnabled = true;
+    testClockValue = value;
+    testClockStep = step;
+}
+unsigned long peekTestMillis(void) { return testClockValue; }
+void resetTestMillis(void) { testClockEnabled = false; }
 unsigned long millis(void) {
+    if (testClockEnabled) {
+        const unsigned long value = testClockValue;
+        testClockValue += testClockStep;
+        return value;
+    }
     return (unsigned long)time(0) * 1000UL;
 }
 }

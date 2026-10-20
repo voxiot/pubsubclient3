@@ -18,6 +18,9 @@ typedef uint8_t boolean;
 extern void setup(void);
 extern void loop(void);
 unsigned long millis(void);
+void setTestMillis(unsigned long value, unsigned long step);
+unsigned long peekTestMillis(void);
+void resetTestMillis(void);
 }
 
 class __FlashStringHelper;

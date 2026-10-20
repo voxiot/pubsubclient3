@@ -13,9 +13,11 @@ class WireClient : public ShimClient {
  public:
     std::deque<uint8_t> input;
     std::vector<uint8_t> wire;
+    size_t writeCalls = 0;
     using ShimClient::write;
     using ShimClient::read;
     size_t write(const uint8_t* bytes, size_t size) override {
+        ++writeCalls;
         const size_t n = ShimClient::write(bytes, size);
         wire.insert(wire.end(), bytes, bytes + n);
         return n;
@@ -53,7 +55,7 @@ struct Fixture {
     explicit Fixture(bool incremental) : mqtt("broker", 1883, received, socket) {
         calls = 0; current = &mqtt; callbackChecks = false;
         disconnectInCallback = publishInCallback = incompleteInCallback = false;
-        mqtt.setSocketTimeout(0); mqtt.setKeepAlive(0);
+        mqtt.setSocketTimeout(1); mqtt.setKeepAlive(0);
         if (incremental) mqtt.setRxBufferSize(64);
     }
     bool connect(const char* id = "test", bool clean = true, bool present = false) {
@@ -224,8 +226,19 @@ static int qos2_capacity(bool incremental) {
         IS_TRUE(f.mqtt.loop());
     }
     const size_t delivered = calls;
+    IS_EQUAL(delivered, (size_t)MQTT_RX_QOS2_MAX_INFLIGHT);
+    // A duplicate at capacity must be acknowledged without taking another slot.
+    f.socket.queue({0x3c, 6, 0, 1, 't', 0, 1, 'x'});
+    IS_TRUE(f.mqtt.loop()); IS_EQUAL(calls, delivered);
+    // Release one slot, then fill it with a distinct identifier.
+    f.socket.queue({0x62, 2, 0, 1}); IS_TRUE(f.mqtt.loop());
+    const size_t next = MQTT_RX_QOS2_MAX_INFLIGHT + 1u;
+    f.socket.queue({0x34, 6, 0, 1, 't', (uint8_t)(next >> 8), (uint8_t)next, 'x'});
+    IS_TRUE(f.mqtt.loop()); IS_EQUAL(calls, delivered + 1);
+    const size_t wireBefore = f.socket.wire.size();
     f.socket.queue({0x34, 6, 0, 1, 't', 0x7f, 0xfe, 'x'});
-    IS_FALSE(f.mqtt.loop()); IS_EQUAL(calls, delivered);
+    IS_FALSE(f.mqtt.loop()); IS_EQUAL(calls, delivered + 1);
+    IS_EQUAL(f.socket.wire.size(), wireBefore); // no PUBREC for the untracked message
     IS_FALSE(f.mqtt.connected());
     END_IT
 }
@@ -312,6 +325,87 @@ static int topic_limits() {
     END_IT
 }
 
+// A scoped clock keeps deadline checks deterministic without changing firmware code.
+struct TestClock {
+    TestClock() { setTestMillis(100, 1); }
+    ~TestClock() { resetTestMillis(); }
+};
+
+static int control_response_writes(bool incremental) {
+    IT("PUBREL/PUBCOMP/PINGRESP complete short writes or close without corrupting the stream");
+    TestClock clock;
+    for (int packet = 0; packet < 3; ++packet) {
+        for (int outcome = 0; outcome < 3; ++outcome) {
+            Fixture f(incremental); IS_TRUE(f.connect());
+            const size_t length = packet == 2 ? 2u : 4u;
+            const uint8_t response = packet == 0 ? 0x62 : packet == 1 ? 0x70 : 0xd0;
+            f.socket.setWriteChunk(1);
+            if (outcome != 0) f.socket.setWriteLimit(outcome == 1 ? 1 : 0);
+            if (packet == 0) f.socket.queue({0x50, 2, 0x12, 0x34});
+            if (packet == 1) f.socket.queue({0x62, 2, 0x12, 0x34});
+            if (packet == 2) f.socket.queue({0xc0, 0});
+            const size_t writesBefore = f.socket.writeCalls;
+            if (outcome == 0) {
+                IS_TRUE(f.mqtt.loop()); IS_TRUE(f.mqtt.connected());
+                const std::vector<uint8_t> expected = packet == 2
+                    ? std::vector<uint8_t>{response, 0}
+                    : std::vector<uint8_t>{response, 2, 0x12, 0x34};
+                IS_TRUE(f.socket.wire == expected);
+                IS_EQUAL(f.socket.writeCalls - writesBefore, length);
+            } else {
+                IS_FALSE(f.mqtt.loop()); IS_FALSE(f.mqtt.connected());
+                IS_EQUAL(f.mqtt.state(), MQTT_CONNECTION_LOST);
+                IS_EQUAL(f.socket.wire.size(), (outcome == 1 ? 1u : 0u));
+                if (outcome == 2) IS_EQUAL(f.socket.writeCalls - writesBefore, 1u);
+                f.socket.setWriteLimit(1024);
+                IS_TRUE(f.connect());
+                const size_t callbacksBefore = calls;
+                f.socket.queue({0x30, 4, 0, 1, 't', 'x'});
+                IS_TRUE(f.mqtt.loop()); IS_EQUAL(calls, callbacksBefore + 1);
+            }
+        }
+    }
+    END_IT
+}
+
+static int socket_timeout_defaults(bool incremental) {
+    IT("socket timeout defaults, explicit values and zero fallback also bound packet reads");
+    TestClock clock;
+    for (int setting = 0; setting < 4; ++setting) {
+        WireClient socket;
+        PubSubClient mqtt("broker", 1883, received, socket);
+        mqtt.setKeepAlive(0);
+        if (incremental) IS_TRUE(mqtt.setRxBufferSize(64));
+        if (setting == 1) mqtt.setSocketTimeout(2);
+        if (setting == 2) mqtt.setSocketTimeout(2).setSocketTimeout(0);
+        if (setting == 3) mqtt.setSocketTimeout(2).setPacketTimeout(1).setPacketTimeout(0);
+        socket.queue({0x20, 2, 0, 0});
+        IS_TRUE(mqtt.connect("timeout"));
+        const unsigned long timeout = (setting == 1 || setting == 3) ? 2000UL : MQTT_SOCKET_TIMEOUT * 1000UL;
+        setTestMillis(100, incremental ? 0 : 1);
+        socket.queue({0x30, 0x80}); // incomplete remaining-length field
+        if (incremental) {
+            IS_TRUE(mqtt.loop());
+            setTestMillis(100 + timeout - 1, 0);
+            IS_TRUE(mqtt.loop());
+            setTestMillis(100 + timeout, 0);
+        }
+        IS_FALSE(mqtt.loop());
+        IS_EQUAL(mqtt.state(), MQTT_CONNECTION_TIMEOUT);
+        if (!incremental) {
+            IS_TRUE(peekTestMillis() >= 100 + timeout);
+            IS_TRUE(peekTestMillis() < 100 + timeout + 20);
+        }
+        setTestMillis(100, 1);
+    }
+    // Zero must restore a positive retry budget, not immediately fail a short write.
+    Fixture f(incremental); IS_TRUE(f.connect());
+    f.mqtt.setSocketTimeout(2).setSocketTimeout(0);
+    f.socket.setWriteChunk(1);
+    IS_TRUE(f.mqtt.publish("t", "ok")); IS_TRUE(f.mqtt.connected());
+    END_IT
+}
+
 int main(int argc, char** argv) {
     SUITE("Session, memory and packet integrity regressions");
     if (argc > 1 && strcmp(argv[1], "--callback-only") == 0) {
@@ -324,6 +418,7 @@ int main(int argc, char** argv) {
         malformed_qos_recovers(mode != 0); manual_publish(mode != 0);
         incoming_budget(mode != 0); qos2_dedup(mode != 0); qos2_capacity(mode != 0); callback_publish(mode != 0);
         unfinished_callback_publish(mode != 0);
+        control_response_writes(mode != 0); socket_timeout_defaults(mode != 0);
     }
     FINISH
 }

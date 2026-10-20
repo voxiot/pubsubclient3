@@ -46,6 +46,8 @@ Os recursos opcionais abaixo preservam os padrões clássicos. Por padrão, um p
   client.setPacketTimeout(10);  // 0 (padrão) = usa o timeout do socket
   ```
 
+  O timeout padrão do socket é **15 segundos**. `setSocketTimeout(2)` seleciona dois segundos; `setSocketTimeout(0)` restaura `MQTT_SOCKET_TIMEOUT`, inclusive quando definido na compilação. Diferentemente das versões anteriores, zero deixa de provocar expiração imediata e nunca significa espera infinita. `MQTT_SOCKET_TIMEOUT` deve estar entre 1 e 65535 segundos, verificado por `static_assert`. `setPacketTimeout(0)` continua usando o timeout efetivo do socket. São prazos da biblioteca, não uma garantia de que chamadas TCP/TLS subjacentes não bloqueiem por mais tempo. Os laços de espera cedem CPU à plataforma; um timeout maior ainda pode atrasar funções da aplicação mesmo com o watchdog atendido.
+
 - **Política para pacotes grandes demais.** Quando um pacote recebido não cabe no buffer:
 
   ```c
@@ -114,6 +116,12 @@ O retorno imediato quando a primeira escrita aceita zero bytes e o prazo de tent
 
 Cobertura de regressão: `tests/src/resilience_spec.cpp`, executado por `make test`, cobre as dez correções em ambos os modos de recepção quando aplicável, a ordem dos bytes no transporte, reconexão, identidade de sessões persistentes e capacidade de QoS 2. O transporte simulado usa contadores `size_t` para percorrer arrays, evitando overflow no laço de escrita de um tópico válido com 65535 bytes. Execute a suíte também com `MQTT_MAX_TRANSFER_SIZE=4` e com AddressSanitizer para verificar limites entre blocos e o tempo de vida da memória.
 
+### Respostas de controle e verificações de configuração
+
+PUBREL, PUBCOMP e PINGRESP usam o mesmo helper de conclusão de escritas parciais dos pacotes de saída. Uma escrita parcial recuperável é completada dentro do timeout do socket. Se não for possível concluir, a conexão é encerrada com `MQTT_CONNECTION_LOST`. Se a primeira escrita aceitar zero bytes, essas respostas obrigatórias encerram a conexão imediatamente, sem novas tentativas até o timeout. Isso preserva sua política de falha e evita reconexões quando a escrita parcial pode ser completada.
+
+`make test` também executa `tests/check_config.py` para verificar limites aceitos e rejeitados na compilação, usando a biblioteca padrão do Python 3 e o compilador C++ configurado. Para executar separadamente a partir de `tests/`, use `make config-test` ou `python3 check_config.py --compiler g++`. As regressões em execução ficam em `resilience_spec.cpp`, incluindo os dois modos de recepção, bytes exatos das respostas, contagem de chamadas nas escritas de zero bytes, restauração do timeout e reutilização dos slots de QoS 2. Um relógio com escopo limitado aos testes de host exercita os prazos sem esperas reais longas. A suíte de keepalive também avança segundos simulados explicitamente, para que o escalonamento do host não desloque os horários esperados dos pings; as demais suítes mantêm seu comportamento de relógio existente. Repita a suíte com `MQTT_RX_QOS2_MAX_INFLIGHT=4`, `MQTT_SOCKET_TIMEOUT=1` e `MQTT_MAX_TRANSFER_SIZE=4`, aplicando cada definição também à biblioteca.
+
 ## Exemplos
 
 A biblioteca inclui vários sketches de exemplo. No aplicativo Arduino, veja Arquivo > Exemplos > PubSubClient.
@@ -123,6 +131,7 @@ A documentação completa da API está disponível em: https://hmueller01.github
 ## Limitações
 
 - O cliente é baseado na [especificação MQTT versão 3.1.1](https://docs.oasis-open.org/mqtt/mqtt/v3.1.1/os/mqtt-v3.1.1-os.html), com algumas limitações.
+- O controle de QoS 2 recebido usa **um identificador pendente** por padrão (`MQTT_RX_QOS2_MAX_INFLIGHT=1`). Um novo identificador distinto recebido com todos os slots ocupados encerra a conexão antes de entregar ao callback ou enviar PUBREC; uma duplicata não ocupa outro slot. PUBREL libera o slot. Se forem esperadas entregas QoS 2 simultâneas, defina, por exemplo, `MQTT_RX_QOS2_MAX_INFLIGHT=4`, consistentemente na biblioteca e na aplicação. O array de identificadores ocupa `2 * N` bytes por cliente; quatro slots acrescentam seis bytes ao padrão. O `static_assert` aceita de 1 a 65535 slots; esse limite do protocolo não garante que o array escolhido caiba na RAM do dispositivo.
 - Pode publicar com QoS 0 e, desde a [v3.2.0](https://github.com/hmueller01/pubsubclient3/releases/tag/v3.2.0), também com QoS 1 ou 2.
 
   **ATENÇÃO:** Não há suporte à retransmissão MQTT de saída, para manter baixo o consumo de memória da biblioteca.
