@@ -555,7 +555,7 @@ bool PubSubClient::handlePacket(uint8_t* buf, size_t bufSize, uint8_t hdrLen, si
             if (publishQos > MQTT_QOS0) {
                 const uint8_t ack[] = {(uint8_t)(publishQos == MQTT_QOS1 ? MQTTPUBACK : MQTTPUBREC),
                                        2, (uint8_t)(msgId >> 8), (uint8_t)msgId};
-                if (!writeToClient(ack, sizeof(ack))) return false;
+                if (!writeControlResponse(ack, sizeof(ack))) return false;
             }
             break;
         }
@@ -577,12 +577,7 @@ bool PubSubClient::handlePacket(uint8_t* buf, size_t bufSize, uint8_t hdrLen, si
             // MQTT Publish Release (QoS 2 publisher handshake, part 2): See section 3.6 MQTT v3.1.1 protocol specification
             buf[0] = MQTTPUBREL | 2;  // PUBREL fixed header: bit 1 must be set per spec
             // bytes 1-3 of PUBREL are the same as of PUBREC (remaining length + msgId)
-            if (!writeToClient(buf, 4)) {
-                ERROR_PSC_PRINTF_P("handlePacket(): failed to write PUBREL\n");
-                // A required control response cannot be dropped, even if no byte was sent.
-                if (_state == MQTT_CONNECTED) closeConnection(MQTT_CONNECTION_LOST);
-                return false;
-            }
+            if (!writeControlResponse(buf, 4)) return false;
             break;
         case MQTTPUBREL:
             // MQTT Publish Release (QoS 2 subscriber handshake, part 2): broker releases the message to us.
@@ -601,12 +596,7 @@ bool PubSubClient::handlePacket(uint8_t* buf, size_t bufSize, uint8_t hdrLen, si
             // MQTT Publish Complete (QoS 2 subscriber handshake, part 3): See section 3.7 MQTT v3.1.1 protocol specification
             buf[0] = MQTTPUBCOMP;
             // bytes 1-3 of PUBCOMP are the same as of PUBREL (remaining length + msgId)
-            if (!writeToClient(buf, 4)) {
-                ERROR_PSC_PRINTF_P("handlePacket(): failed to write PUBCOMP\n");
-                // A required control response cannot be dropped, even if no byte was sent.
-                if (_state == MQTT_CONNECTED) closeConnection(MQTT_CONNECTION_LOST);
-                return false;
-            }
+            if (!writeControlResponse(buf, 4)) return false;
             break;
         case MQTTPUBCOMP:
             // MQTT Publish Complete (QoS 2 publisher handshake, part 3): broker confirms delivery of our QoS 2 PUBLISH.
@@ -621,12 +611,7 @@ bool PubSubClient::handlePacket(uint8_t* buf, size_t bufSize, uint8_t hdrLen, si
             // MQTT Ping Request: See section 3.12 MQTT v3.1.1 protocol specification
             buf[0] = MQTTPINGRESP;
             buf[1] = 0;
-            if (!writeToClient(buf, 2)) {
-                ERROR_PSC_PRINTF_P("handlePacket(): failed to write PINGRESP\n");
-                // A required control response cannot be dropped, even if no byte was sent.
-                if (_state == MQTT_CONNECTED) closeConnection(MQTT_CONNECTION_LOST);
-                return false;
-            }
+            if (!writeControlResponse(buf, 2)) return false;
             break;
         case MQTTPINGRESP:
             _pingOutstanding = false;
@@ -659,7 +644,8 @@ bool PubSubClient::loop() {
         } else {
             _buffer[0] = MQTTPINGREQ;
             _buffer[1] = 0;
-            if (writeToClient(_buffer, 2)) {
+            // Automatic protocol writes make one transport attempt in incremental mode.
+            if (writeToClient(_buffer, 2, false, _rxBuffer == nullptr)) {
                 // Re-stamp both from t: writeToClient() set _lastOutActivity from a later millis() read of
                 // its own, and the ping schedule must not drift apart for what is a single event.
                 _lastInActivity = _lastOutActivity = t;
@@ -988,19 +974,19 @@ size_t PubSubClient::write_P(const uint8_t* buf, size_t size) {
 }
 
 /**
- * @brief  Write to the network client, completing a short write instead of abandoning the packet.
+ * @brief Write to the network client, completing short writes when retries are enabled.
  *
  * A Client may accept fewer bytes than asked (a full transmit window, a timeout hit mid-record), and what that
  * leaves behind depends on how far it got:
  * - Nothing written and no earlier part of this packet sent: the stream is still correctly framed.
  *   Return immediately if the first write accepts zero bytes; the caller can retry on a later loop.
- * - Partially written: the fixed header already announced a remaining length, so the peer is now reading the
- *   body of a packet whose tail never arrives and will take the next packet as its continuation. No later
- *   packet can be parsed correctly; the stream is desynchronised for good.
+ * - Partially written: the peer is waiting for the rest of this packet. Either complete it before
+ *   sending another packet, or close the connection. Abandoning it on an open connection corrupts framing.
  * The second case is why the bytes that did go out must be followed by the rest: the packet is still in the
  * caller's buffer and the count tells exactly how much is missing, so this retries the remainder (yielding
- * between attempts) until the socket accepts it, the socket closes, or _socketTimeoutMillis runs out. The
- * underlying Client has a timeout of its own, so that bound is what the caller tunes via setSocketTimeout().
+ * between attempts) until the socket accepts it, the socket closes, or _socketTimeoutMillis runs out. With
+ * retries disabled, an incomplete first attempt that started a packet closes instead. This deadline does not configure
+ * underlying Client timeouts or bound the duration of a single blocking transport call.
  *
  * A failed write closes the connection if this call or an earlier part of the same packet sent bytes: a reconnect is the
  * one way back in sync, and the alternative is worse than it looks — the next PINGREQ is swallowed by the same
@@ -1010,15 +996,21 @@ size_t PubSubClient::write_P(const uint8_t* buf, size_t size) {
  * @param  buf Bytes to write.
  * @param  size Number of bytes to write.
  * @param  packetStarted True if an earlier part of this MQTT packet was already sent (e.g. the PUBLISH header).
+ * @param  allowRetry False makes at most one transport write (for a nonempty buffer), with no retry-loop
+ * yield or deadline-clock sampling. Closure precedence on an incomplete attempt:
+ * - Any byte sent, or packetStarted=true: close internally with MQTT_CONNECTION_LOST, then return false.
+ * - Zero bytes and packetStarted=false: return false without closing; the caller chooses its policy.
+ * Callers must not close again after an internal close or overwrite its state. A successful send still
+ * samples millis() once to update _lastOutActivity. The transport/stop calls themselves may block.
  * @return true if all size bytes were written (_lastOutActivity updated). false if they were not: if no part
  * of the packet was sent the connection is left alone, otherwise the connection is
  * closed and _state is set to #MQTT_CONNECTION_LOST.
  */
-bool PubSubClient::writeToClient(const uint8_t* buf, size_t size, bool packetStarted) {
+bool PubSubClient::writeToClient(const uint8_t* buf, size_t size, bool packetStarted, bool allowRetry) {
     if (!_client) return false;
 
     size_t written = 0;
-    const unsigned long start = millis();
+    const unsigned long start = allowRetry ? millis() : 0;
 
     while (written < size) {
         written += _client->write(buf + written, size - written);
@@ -1028,7 +1020,7 @@ bool PubSubClient::writeToClient(const uint8_t* buf, size_t size, bool packetSta
             ERROR_PSC_PRINTF_P("writeToClient(): wrote no byte of %zu, connection kept\n", size);
             return false;
         }
-        if (millis() - start >= _socketTimeoutMillis) break;
+        if (!allowRetry || millis() - start >= _socketTimeoutMillis) break;
         if (!_client->connected()) break;  // fail fast instead of retrying into a closed socket
         PUBSUB_WAIT_YIELD();
     }
@@ -1040,6 +1032,15 @@ bool PubSubClient::writeToClient(const uint8_t* buf, size_t size, bool packetSta
 
     ERROR_PSC_PRINTF_P("writeToClient(): wrote %zu of %zu bytes (packetStarted=%u), closing connection to resynchronise\n", written, size, (unsigned int)packetStarted);
     closeConnection(MQTT_CONNECTION_LOST);
+    return false;
+}
+
+// Required replies cannot be forgotten after consuming the incoming packet. Unlike PINGREQ,
+// even a zero-byte write closes the connection; incremental mode never retries the transport.
+bool PubSubClient::writeControlResponse(const uint8_t* buf, size_t size) {
+    if (writeToClient(buf, size, false, _rxBuffer == nullptr)) return true;
+    // Partial writes have already closed internally; only close a still-open failed response.
+    if (_state == MQTT_CONNECTED) closeConnection(MQTT_CONNECTION_LOST);
     return false;
 }
 

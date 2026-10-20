@@ -281,7 +281,8 @@ class PubSubClient : public Print {
     bool readByte(uint8_t* result);
     bool readByte(uint8_t* result, size_t* pos);
     uint8_t buildHeader(uint8_t header, size_t length);
-    bool writeToClient(const uint8_t* buf, size_t size, bool packetStarted = false);
+    bool writeToClient(const uint8_t* buf, size_t size, bool packetStarted = false, bool allowRetry = true);
+    bool writeControlResponse(const uint8_t* buf, size_t size);
     bool writeControlPacket(uint8_t header, size_t length);
     size_t writeBuffer(size_t pos, size_t size, bool packetStarted = false);
     size_t writeStringImpl(bool progmem, const char* string, size_t pos);
@@ -492,7 +493,7 @@ class PubSubClient : public Print {
      * whilst it is in the middle of reading a MQTT packet.
      * @param timeout The socket timeout, in seconds. Zero restores MQTT_SOCKET_TIMEOUT
      * (15 seconds unless overridden at compile time); it never means an infinite wait.
-     * This also bounds library retries for an already-started outgoing packet.
+     * When retries are enabled, this also bounds them for an already-started outgoing packet.
      * Underlying transport calls may have their own blocking behavior.
      * @return The client instance, allowing the function to be chained.
      */

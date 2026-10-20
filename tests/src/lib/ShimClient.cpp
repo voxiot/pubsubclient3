@@ -11,6 +11,7 @@ namespace {
 bool testClockEnabled = false;
 unsigned long testClockValue = 0;
 unsigned long testClockStep = 0;
+unsigned long testYieldCalls = 0;
 }
 extern "C" {
 void setTestMillis(unsigned long value, unsigned long step) {
@@ -20,6 +21,8 @@ void setTestMillis(unsigned long value, unsigned long step) {
 }
 unsigned long peekTestMillis(void) { return testClockValue; }
 void resetTestMillis(void) { testClockEnabled = false; }
+void recordTestYield(void) { ++testYieldCalls; }
+unsigned long getTestYieldCalls(void) { return testYieldCalls; }
 unsigned long millis(void) {
     if (testClockEnabled) {
         const unsigned long value = testClockValue;

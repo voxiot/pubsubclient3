@@ -21,6 +21,8 @@ unsigned long millis(void);
 void setTestMillis(unsigned long value, unsigned long step);
 unsigned long peekTestMillis(void);
 void resetTestMillis(void);
+void recordTestYield(void);
+unsigned long getTestYieldCalls(void);
 }
 
 class __FlashStringHelper;
@@ -32,7 +34,7 @@ class __FlashStringHelper;
 #define pgm_read_byte_near(x) *(x)
 #define F(x) (reinterpret_cast<const __FlashStringHelper*>(x))
 
-#define yield(x) {}
+#define yield(x) recordTestYield()
 
 #pragma GCC system_header
 #define ERROR_PSC_PRINTF(fmt, ...) printf(("PubSubClient error: " fmt), ##__VA_ARGS__)

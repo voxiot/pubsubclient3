@@ -14,10 +14,15 @@ class WireClient : public ShimClient {
     std::deque<uint8_t> input;
     std::vector<uint8_t> wire;
     size_t writeCalls = 0;
+    size_t stopCalls = 0;
+    unsigned long timeAtWrite = 0;
+    unsigned long yieldsAtWrite = 0;
     using ShimClient::write;
     using ShimClient::read;
     size_t write(const uint8_t* bytes, size_t size) override {
         ++writeCalls;
+        timeAtWrite = peekTestMillis();
+        yieldsAtWrite = getTestYieldCalls();
         const size_t n = ShimClient::write(bytes, size);
         wire.insert(wire.end(), bytes, bytes + n);
         return n;
@@ -27,7 +32,7 @@ class WireClient : public ShimClient {
         if (input.empty()) return -1;
         const int b = input.front(); input.pop_front(); return b;
     }
-    void stop() override { input.clear(); ShimClient::stop(); }
+    void stop() override { ++stopCalls; input.clear(); ShimClient::stop(); }
     void queue(std::initializer_list<uint8_t> bytes) { input.insert(input.end(), bytes); }
 };
 
@@ -332,37 +337,105 @@ struct TestClock {
 };
 
 static int control_response_writes(bool incremental) {
-    IT("PUBREL/PUBCOMP/PINGRESP complete short writes or close without corrupting the stream");
+    IT("all five required replies use one attempt in incremental mode and retry in blocking mode");
     TestClock clock;
-    for (int packet = 0; packet < 3; ++packet) {
-        for (int outcome = 0; outcome < 3; ++outcome) {
+    for (int packet = 0; packet < 5; ++packet) {
+        // Complete write, recoverable short write, stalled partial write, and zero-byte write.
+        for (int outcome = 0; outcome < 4; ++outcome) {
             Fixture f(incremental); IS_TRUE(f.connect());
             const size_t length = packet == 2 ? 2u : 4u;
-            const uint8_t response = packet == 0 ? 0x62 : packet == 1 ? 0x70 : 0xd0;
-            f.socket.setWriteChunk(1);
-            if (outcome != 0) f.socket.setWriteLimit(outcome == 1 ? 1 : 0);
+            const uint8_t responses[] = {0x62, 0x70, 0xd0, 0x40, 0x50};
+            const uint8_t response = responses[packet];
+            if (outcome == 1 || outcome == 2) f.socket.setWriteChunk(1);
+            if (outcome >= 2) f.socket.setWriteLimit(outcome == 2 ? 1 : 0);
             if (packet == 0) f.socket.queue({0x50, 2, 0x12, 0x34});
             if (packet == 1) f.socket.queue({0x62, 2, 0x12, 0x34});
             if (packet == 2) f.socket.queue({0xc0, 0});
+            if (packet == 3) f.socket.queue({0x32, 6, 0, 1, 't', 0x12, 0x34, 'x'});
+            if (packet == 4) f.socket.queue({0x34, 6, 0, 1, 't', 0x12, 0x34, 'x'});
             const size_t writesBefore = f.socket.writeCalls;
-            if (outcome == 0) {
+            const unsigned long timeBefore = peekTestMillis();
+            if (outcome == 0 || (outcome == 1 && !incremental)) {
                 IS_TRUE(f.mqtt.loop()); IS_TRUE(f.mqtt.connected());
                 const std::vector<uint8_t> expected = packet == 2
                     ? std::vector<uint8_t>{response, 0}
                     : std::vector<uint8_t>{response, 2, 0x12, 0x34};
                 IS_TRUE(f.socket.wire == expected);
-                IS_EQUAL(f.socket.writeCalls - writesBefore, length);
+                IS_EQUAL(f.socket.writeCalls - writesBefore, (outcome == 0 ? 1u : length));
             } else {
                 IS_FALSE(f.mqtt.loop()); IS_FALSE(f.mqtt.connected());
                 IS_EQUAL(f.mqtt.state(), MQTT_CONNECTION_LOST);
-                IS_EQUAL(f.socket.wire.size(), (outcome == 1 ? 1u : 0u));
-                if (outcome == 2) IS_EQUAL(f.socket.writeCalls - writesBefore, 1u);
+                IS_EQUAL(f.socket.wire.size(), (outcome == 3 ? 0u : 1u));
+                IS_EQUAL(f.socket.stopCalls, 1u); // helper and caller must not both close
+                if (incremental) {
+                    IS_EQUAL(peekTestMillis(), f.socket.timeAtWrite);
+                    IS_EQUAL(getTestYieldCalls(), f.socket.yieldsAtWrite);
+                }
+                if (incremental || outcome == 3) {
+                    IS_EQUAL(f.socket.writeCalls - writesBefore, 1u);
+                } else {
+                    IS_TRUE(f.socket.writeCalls - writesBefore > 1u);
+                    IS_TRUE(peekTestMillis() - timeBefore >= 1000UL);
+                }
                 f.socket.setWriteLimit(1024);
                 IS_TRUE(f.connect());
                 const size_t callbacksBefore = calls;
                 f.socket.queue({0x30, 4, 0, 1, 't', 'x'});
                 IS_TRUE(f.mqtt.loop()); IS_EQUAL(calls, callbacksBefore + 1);
             }
+        }
+    }
+    END_IT
+}
+
+static int keepalive_write_policy(bool incremental) {
+    IT("PINGREQ follows receive mode; zero bytes defer the ping without arming its timeout");
+    TestClock clock;
+    for (int outcome = 0; outcome < 4; ++outcome) {
+        Fixture f(incremental); IS_TRUE(f.connect());
+        f.mqtt.setKeepAlive(1);
+        if (outcome == 1 || outcome == 2) f.socket.setWriteChunk(1);
+        if (outcome >= 2) f.socket.setWriteLimit(outcome == 2 ? 1 : 0);
+        setTestMillis(peekTestMillis() + 2000UL, 1);
+        const size_t writesBefore = f.socket.writeCalls;
+        if (outcome == 0 || (outcome == 1 && !incremental)) {
+            IS_TRUE(f.mqtt.loop()); IS_TRUE(f.mqtt.connected());
+            const std::vector<uint8_t> expected = {0xc0, 0};
+            IS_TRUE(f.socket.wire == expected);
+            IS_EQUAL(f.socket.writeCalls - writesBefore, (outcome == 0 ? 1u : 2u));
+            // This PINGRESP must clear the outstanding ping before the next deadline.
+            f.socket.queue({0xd0, 0}); IS_TRUE(f.mqtt.loop());
+            setTestMillis(peekTestMillis() + 2000UL, 1);
+            IS_TRUE(f.mqtt.loop()); IS_TRUE(f.mqtt.connected());
+        } else if (outcome == 3) {
+            IS_TRUE(f.mqtt.loop()); IS_TRUE(f.mqtt.connected());
+            IS_TRUE(f.socket.wire.empty());
+            IS_EQUAL(f.socket.writeCalls - writesBefore, 1u);
+            f.socket.setWriteLimit(1024);
+            setTestMillis(peekTestMillis() + 2000UL, 1);
+            // An incorrectly armed ping would close the connection here.
+            IS_TRUE(f.mqtt.loop()); IS_TRUE(f.mqtt.connected());
+            const std::vector<uint8_t> expected = {0xc0, 0};
+            IS_TRUE(f.socket.wire == expected);
+            IS_EQUAL(f.socket.writeCalls - writesBefore, 2u);
+        } else {
+            f.socket.queue({0x30, 4, 0, 1, 't', 'x'});
+            IS_FALSE(f.mqtt.loop()); IS_FALSE(f.mqtt.connected());
+            IS_EQUAL(f.mqtt.state(), MQTT_CONNECTION_LOST);
+            IS_EQUAL(calls, 0u); // do not dispatch RX after failing to send the ping
+            IS_EQUAL(f.socket.wire.size(), 1u);
+            IS_EQUAL(f.socket.stopCalls, 1u);
+            if (incremental) {
+                IS_EQUAL(peekTestMillis(), f.socket.timeAtWrite);
+                IS_EQUAL(getTestYieldCalls(), f.socket.yieldsAtWrite);
+                IS_EQUAL(f.socket.writeCalls - writesBefore, 1u);
+            } else {
+                IS_TRUE(f.socket.writeCalls - writesBefore > 1u);
+            }
+            f.socket.setWriteLimit(1024);
+            IS_TRUE(f.connect());
+            f.socket.queue({0x30, 4, 0, 1, 't', 'x'});
+            IS_TRUE(f.mqtt.loop()); IS_EQUAL(calls, 1u);
         }
     }
     END_IT
@@ -418,7 +491,8 @@ int main(int argc, char** argv) {
         malformed_qos_recovers(mode != 0); manual_publish(mode != 0);
         incoming_budget(mode != 0); qos2_dedup(mode != 0); qos2_capacity(mode != 0); callback_publish(mode != 0);
         unfinished_callback_publish(mode != 0);
-        control_response_writes(mode != 0); socket_timeout_defaults(mode != 0);
+        control_response_writes(mode != 0); keepalive_write_policy(mode != 0);
+        socket_timeout_defaults(mode != 0);
     }
     FINISH
 }
