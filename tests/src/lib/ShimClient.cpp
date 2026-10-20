@@ -100,7 +100,7 @@ size_t ShimClient::write(const uint8_t *buf, size_t size) {
     }
     this->_received += size;
     TRACE("[" << std::dec << (unsigned int)(size) << "] ");
-    uint16_t i = 0;
+    size_t i = 0;
     for (; i < size; i++) {
         if (i > 0) {
             TRACE(":");
@@ -129,7 +129,7 @@ int ShimClient::read() {
     return this->responseBuffer->next();
 }
 int ShimClient::read(uint8_t *buf, size_t size) {
-    uint16_t i = 0;
+    size_t i = 0;
     for (; i < size; i++) {
         buf[i] = this->read();
     }

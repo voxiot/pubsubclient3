@@ -296,7 +296,7 @@ int test_connect_disconnect_connect() {
     state = client.state();
     IS_TRUE(state == MQTT_DISCONNECTED);
 
-    shimClient.expect(connect, 28);
+    shimClient.expect(connect, sizeof(connect));
     shimClient.respond(connack, 4);
     rc = client.connect("client_test1");
     IS_TRUE(rc);

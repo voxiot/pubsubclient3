@@ -28,3 +28,4 @@ test: all
 	@bin/subscribe_spec
 	@bin/keepalive_spec
 	@bin/fragmented_spec
+	@bin/resilience_spec

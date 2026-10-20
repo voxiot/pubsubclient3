@@ -1,5 +1,7 @@
 # Arduino Client for MQTT
 
+**English** | [Português (Brasil)](README.pt-BR.md)
+
 This library provides a client for doing simple publish/subscribe messaging with
 a server that supports MQTT.
 
@@ -12,7 +14,7 @@ Starting with **v4.0.0**, this repository (`voxiot/pubsubclient3`) **diverges** 
 > [!IMPORTANT]
 > **Diverged fork.** Based on upstream `hmueller01/pubsubclient3 v3.3.2`, independently versioned from **v4.0.0** onward.
 >
-> We no longer track upstream version-for-version. Upstream changes are reviewed individually and cherry-picked only when they make sense for this fork. The public API remains backward compatible. Optional v4 resilience features are **opt-in**; the oversized-packet default and outgoing-write safety fixes apply automatically (see below).
+> We no longer track upstream version-for-version. Upstream changes are reviewed individually and cherry-picked only when they make sense for this fork. Existing method signatures are preserved; copying an owning PubSubClient is now explicitly disabled (see the unreleased safety fixes below). Optional v4 resilience features are **opt-in**; the oversized-packet default and outgoing-write safety fixes apply automatically (see below).
 
 ## Resilience and non-blocking operation (v4)
 
@@ -72,6 +74,35 @@ The fix covers `publish()`, `publish_P()`, the `beginPublish()` / `write()` / `e
 `setOversizedPolicy()` controls **incoming oversized packets only**. It does not control outgoing transmission failures: once a packet has started, abandoning its remaining bytes requires closing the connection to restore framing on a new connection.
 
 Regression coverage is in `tests/src/publish_spec.cpp`, including zero-byte payload failures after a complete header, failures between payload buffers and transfer chunks, blocked subsequent publishes, and clean reconnection. The chunk-specific case is enabled when the test executable and library are compiled with `MQTT_MAX_TRANSFER_SIZE` defined (for example, `4`).
+
+### Session and packet safety (unreleased)
+
+These fixes apply to blocking and incremental receive. They do not change the application's network/OFFLINE policy or the existing socket timeout.
+
+| Case | Before | Now |
+| --- | --- | --- |
+| Callback disconnects and frees/resizes buffers | A later ACK could access freed memory | Buffer changes and reconnect are refused during the callback; ACK uses local bytes and is skipped after disconnect |
+| Copying a client | Copies shared owning pointers; double free on destruction | Copy construction and assignment are deleted; pass clients by reference/pointer |
+| Blocking receive stops mid-packet | Returned with an open, desynchronised socket | Closes with `MQTT_CONNECTION_TIMEOUT`; the next connection starts at a packet boundary |
+| Reconnect after fragmented receive | Old header/payload/discard state could consume the new session | All parser state is reset on close and before connect |
+| Malformed QoS 1/2 packet lacks an identifier | Callback-busy flag could remain set forever | Validates the complete, nonzero identifier before entering the callback; guard is cleared on callback exit |
+| Manual PUBLISH overlaps `loop()` or another operation | ACK, ping or another header could become payload bytes | Tracks the active packet and remaining payload; defers RX/keepalive until `endPublish()` |
+| PUBLISH length arithmetic overflows | Wrapped length could produce a malformed packet | Validates by subtraction before adding; rejects lengths outside protocol/buffer bounds |
+| IGNORE limit smaller than the blocking buffer | Packet could still reach the callback | Drains and drops it using the configured limit, matching incremental receive |
+| Duplicate incoming QoS 2 PUBLISH | Callback could run again before PUBREL | Tracks pending identifiers, repeats PUBREC without repeating the callback, releases on PUBREL |
+| Empty or over-65535-byte topics | Could emit malformed SUBSCRIBE/UNSUBSCRIBE/PUBLISH | Rejects without sending; CONNECT strings and private string writes have checked limits too |
+
+`beginPublish()` / `write()` / `endPublish()` is one synchronous packet transaction. Finish it promptly: while active, `loop()` only checks the connection and defers protocol processing. Nested publishes, subscribe/unsubscribe, reconnect and buffer changes are refused. `write()` outside this transaction returns zero. A write larger than the remaining payload is rejected in full (zero returned); smaller writes can still complete it. `endPublish()` with missing bytes returns false and closes with `MQTT_CONNECTION_LOST`. `disconnect()` during an incomplete transaction closes the socket directly, without inserting a DISCONNECT into the payload. Even a zero-length payload requires `endPublish()`.
+
+A callback may publish synchronously or disconnect. It must finish any manual publish before returning; otherwise the connection closes rather than inserting an ACK into its payload. `setBufferSize()` and `setRxBufferSize()` return false while a callback or manual publish is active, including after a callback calls `disconnect()`. Endpoint/transport/stream changes are ignored during those operations. Topic/payload pointers remain transient: a publish inside the callback may overwrite them, so copy needed data first. The client remains single-threaded; these guards do not provide thread synchronisation.
+
+Incoming QoS 2 tracking uses `MQTT_RX_QOS2_MAX_INFLIGHT` fixed `uint16_t` slots (default **1**, two bytes per slot), with no retained payload. Define this macro consistently for the library and application to support more concurrent incoming handshakes. If every slot is occupied, the client closes before delivering or acknowledging a new identifier; it never evicts an unfinished handshake. This does not add outgoing QoS retransmission support. Stream output is raw receive data and may contain retransmitted payload; duplicate suppression applies to the message callback.
+
+For `cleanSession=false`, the library also owns a copy of the client ID (`strlen(id)+1` bytes, allocated at connection setup, not per message) to distinguish persistent sessions. Pending identifiers survive a transport loss only for the same client ID and configured endpoint/transport, and are retained after reconnect only if MQTT 3.1.1 CONNACK confirms Session Present. A clean/new session, changed client ID, broker or transport clears them. Reapplying the same endpoint/transport preserves them. MQTT 3.1 cannot confirm session continuity, so tracking resets on successful reconnect. State is in RAM and is lost on reboot/destruction; this is not durable exactly-once application delivery. Default clean sessions allocate no client-ID copy.
+
+The initial-zero-write fast failure and retry deadline for an already-started packet remain unchanged. `setOversizedPolicy(MQTT_OVERSIZED_IGNORE)` still preserves a correctly drained connection; incomplete packets and failed outgoing writes must close it to restore framing.
+
+Regression coverage: `tests/src/resilience_spec.cpp`, executed by `make test`, covers the ten fixes in both receive modes where applicable, wire ordering, reconnection, persistent-session identity and QoS 2 capacity. The mock transport uses `size_t` counters for array traversal so a legal 65535-byte topic cannot wrap its write loop. Run the suite again with `MQTT_MAX_TRANSFER_SIZE=4` and with AddressSanitizer for chunk boundaries and memory lifetime checks.
 
 ## Examples
 

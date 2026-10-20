@@ -210,6 +210,12 @@
 #endif
 /// \endcond
 
+// Fixed incoming QoS 2 handshake slots; define consistently in every translation unit.
+#ifndef MQTT_RX_QOS2_MAX_INFLIGHT
+#define MQTT_RX_QOS2_MAX_INFLIGHT 1
+#endif
+static_assert(MQTT_RX_QOS2_MAX_INFLIGHT > 0, "At least one incoming QoS 2 slot is required");
+
 /**
  * @class PubSubClient
  * @brief This class provides a client for doing simple publish and subscribe messaging with a server that supports MQTT.
@@ -220,6 +226,10 @@ class PubSubClient : public Print {
     uint8_t* _buffer{};
     size_t _bufferSize{};
     size_t _bufferWritePos{};
+    size_t _txRemaining{};  // payload bytes not yet accepted by write()
+    bool _txActive{};
+    uint16_t _rxQos2Ids[MQTT_RX_QOS2_MAX_INFLIGHT]{};
+    char* _qos2ClientId{};  // allocated only for persistent sessions; no payload is retained
     size_t _maxIncomingPacket{};  // max accepted incoming packet size; 0 = limit to _bufferSize (see setMaxIncomingPacket())
     // Non-blocking receive state (opt-in via setRxBufferSize()). When _rxBuffer is set and no Stream is used,
     // loop() reassembles incoming packets incrementally into this dedicated buffer across calls, so the main
@@ -258,6 +268,9 @@ class PubSubClient : public Print {
     // sync (the documented "ignore oversized packet" behavior) without ever blocking the loop.
     enum RxState : uint8_t { RX_IDLE = 0, RX_HEADER, RX_PAYLOAD, RX_DISCARD };
 
+    void resetReceiveState();
+    void closeConnection(int reason);
+    void clearQos2Session();
     size_t readPacket(uint8_t* hdrLen);
     bool handlePacket(uint8_t* buf, size_t bufSize, uint8_t hdrLen, size_t length);
     bool processInbound();
@@ -286,6 +299,8 @@ class PubSubClient : public Print {
      * @note Before it can be used, it must be configured using the property setters setClient() and setServer().
      */
     PubSubClient();
+    PubSubClient(const PubSubClient&) = delete;
+    PubSubClient& operator=(const PubSubClient&) = delete;
 
     /**
      * @brief Creates a partially initialised client instance.

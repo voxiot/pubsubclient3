@@ -252,7 +252,7 @@ int test_unsubscribe() {
     IS_TRUE(rc);
 
     byte unsubscribe[] = {0xA2, 0x9, 0x0, 0x2, 0x0, 0x5, 0x74, 0x6f, 0x70, 0x69, 0x63};
-    shimClient.expect(unsubscribe, 12);
+    shimClient.expect(unsubscribe, sizeof(unsubscribe));
     byte unsuback[] = {0xB0, 0x2, 0x0, 0x2};
     shimClient.respond(unsuback, 4);
 
