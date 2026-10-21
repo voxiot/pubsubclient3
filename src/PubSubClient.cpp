@@ -139,15 +139,19 @@ PubSubClient::PubSubClient(const char* domain, uint16_t port, MQTT_CALLBACK_SIGN
 PubSubClient::~PubSubClient() {
     free(_domain);
     free(_buffer);
+#if MQTT_ENABLE_INCREMENTAL_RX
     free(_rxBuffer);
+#endif
     free(_qos2ClientId);
 }
 
 void PubSubClient::resetReceiveState() {
+#if MQTT_ENABLE_INCREMENTAL_RX
     _rxState = RX_IDLE;
     _rxHdrLen = 0;
     _rxMultiplier = 0;
     _rxLen = _rxLength = _rxRemaining = _rxStreamSkip = 0;
+#endif
     _packetReadStart = 0;
     // disconnect() is allowed inside the callback; keep its lifetime guard armed.
     if (!(_rxFlags & MQTT_RX_BUSY)) _rxFlags = 0;
@@ -645,7 +649,12 @@ bool PubSubClient::loop() {
             _buffer[0] = MQTTPINGREQ;
             _buffer[1] = 0;
             // Automatic protocol writes make one transport attempt in incremental mode.
-            if (writeToClient(_buffer, 2, false, _rxBuffer == nullptr)) {
+#if MQTT_ENABLE_INCREMENTAL_RX
+            const bool allowRetry = _rxBuffer == nullptr;
+#else
+            const bool allowRetry = true;
+#endif
+            if (writeToClient(_buffer, 2, false, allowRetry)) {
                 // Re-stamp both from t: writeToClient() set _lastOutActivity from a later millis() read of
                 // its own, and the ping schedule must not drift apart for what is a single event.
                 _lastInActivity = _lastOutActivity = t;
@@ -659,6 +668,7 @@ bool PubSubClient::loop() {
             // later loop() send the ping once the transmit window frees up.
         }
     }
+#if MQTT_ENABLE_INCREMENTAL_RX
     if (_rxBuffer) {
         // Non-blocking receive path (opt-in via setRxBufferSize()): reassemble into the dedicated _rxBuffer,
         // consuming only already-available bytes. Also streams payload bytes to a configured Stream (phase 2).
@@ -668,7 +678,9 @@ bool PubSubClient::loop() {
             // processInbound() has closed the connection and set _state
             return false;
         }
-    } else if (_client->available()) {
+    } else
+#endif
+    if (_client->available()) {
         uint8_t hdrLen;
         size_t len = readPacket(&hdrLen);
         if (len > 0) {
@@ -685,11 +697,12 @@ bool PubSubClient::loop() {
     return ret;
 }
 
+#if MQTT_ENABLE_INCREMENTAL_RX
 /**
  * @brief  Non-blocking incremental receive. Consumes only the bytes currently available in the network stack
  * (never waits) and reassembles the packet into the dedicated _rxBuffer across loop() calls. Dispatches a
  * completed packet via handlePacket(). Enforces the per-packet stall timeout so a half-received packet cannot
- * linger forever. Only used when a receive buffer is set and no Stream is configured (see loop()).
+ * linger forever. Only used when a receive buffer is set, with or without a Stream (see loop()).
  *
  * @return true if processing is ok (packet dispatched, or still in progress). false if the connection was
  * closed (oversized/invalid packet, stall timeout, or handlePacket() failure); _state is set accordingly.
@@ -842,6 +855,8 @@ bool PubSubClient::dispatchInbound() {
     }
     return ok && connected();
 }
+
+#endif
 
 bool PubSubClient::publish(const char* topic, const uint8_t* payload, size_t plength, uint8_t qos, bool retained) {
     if (beginPublish(topic, plength, qos, retained)) {
@@ -1038,7 +1053,12 @@ bool PubSubClient::writeToClient(const uint8_t* buf, size_t size, bool packetSta
 // Required replies cannot be forgotten after consuming the incoming packet. Unlike PINGREQ,
 // even a zero-byte write closes the connection; incremental mode never retries the transport.
 bool PubSubClient::writeControlResponse(const uint8_t* buf, size_t size) {
-    if (writeToClient(buf, size, false, _rxBuffer == nullptr)) return true;
+#if MQTT_ENABLE_INCREMENTAL_RX
+    const bool allowRetry = _rxBuffer == nullptr;
+#else
+    const bool allowRetry = true;
+#endif
+    if (writeToClient(buf, size, false, allowRetry)) return true;
     // Partial writes have already closed internally; only close a still-open failed response.
     if (_state == MQTT_CONNECTED) closeConnection(MQTT_CONNECTION_LOST);
     return false;
@@ -1354,6 +1374,7 @@ size_t PubSubClient::getMaxIncomingPacket() {
     return _maxIncomingPacket;
 }
 
+#if MQTT_ENABLE_INCREMENTAL_RX
 bool PubSubClient::setRxBufferSize(size_t size) {
     if ((_rxFlags & MQTT_RX_BUSY) || _txActive) return false;
     if (_rxState != RX_IDLE) return false;  // never resize/free while a packet is being reassembled
@@ -1388,6 +1409,8 @@ PubSubClient& PubSubClient::setMaxBytesPerLoop(size_t maxBytes) {
 size_t PubSubClient::getMaxBytesPerLoop() {
     return _maxBytesPerLoop;
 }
+
+#endif
 
 PubSubClient& PubSubClient::setOversizedPolicy(uint8_t policy) {
     _oversizedPolicy = (policy == MQTT_OVERSIZED_IGNORE) ? MQTT_OVERSIZED_IGNORE : MQTT_OVERSIZED_DISCONNECT;

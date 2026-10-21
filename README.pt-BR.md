@@ -17,8 +17,9 @@ A partir da **v4.0.0**, este repositório (`voxiot/pubsubclient3`) **segue uma l
 
 ## Por que a versão 5.0.0? Migração da v4
 
-A versão **5.0.0** é uma versão major porque as correções de integridade de pacotes e sessões tornam incompatíveis dois padrões de uso anteriormente aceitos. Embora as assinaturas dos métodos existentes sejam preservadas, esta atualização não é um patch totalmente compatível com as versões anteriores:
+A versão **5.0.0** é uma versão major porque as correções de integridade de pacotes e sessões alteram padrões de uso anteriormente aceitos. Embora as assinaturas dos métodos existentes sejam preservadas, esta atualização não é um patch totalmente compatível com as versões anteriores:
 
+- **A recepção incremental exige uma flag de compilação.** O build padrão exclui estado, parser e APIs incrementais. Consumidores incrementais devem definir `MQTT_ENABLE_INCREMENTAL_RX=1` consistentemente na biblioteca e na aplicação, recompilar e manter a chamada a `setRxBufferSize()` em execução. Veja o perfil de recepção abaixo.
 - **A cópia de clientes foi proibida.** O construtor de cópia e a atribuição por cópia foram excluídos porque duplicavam ponteiros proprietários e poderiam causar liberação duplicada de memória. Passe `PubSubClient` por referência ou ponteiro; crie e configure outra instância quando precisar de um cliente independente.
 - **A publicação manual é uma transação explícita de pacote.** Todo `beginPublish()` bem-sucedido deve ser seguido de exatamente a quantidade anunciada de bytes de payload e de `endPublish()`, inclusive para um payload vazio. `write()` fora de uma transação retorna zero; uma escrita maior que o payload restante é rejeitada integralmente. Finalizar com bytes faltando encerra a conexão com `MQTT_CONNECTION_LOST`.
 
@@ -26,11 +27,26 @@ Durante uma publicação manual, `loop()` verifica a conexão, mas adia a recep�
 
 Aplicações que já mantêm clientes por referência/ponteiro e concluem cada publicação manual normalmente não precisam de ajustes nesses dois pontos de migração. A versão também reinicia o estado do parser entre conexões, valida tamanhos e identificadores e controla duplicatas de QoS 2 recebido. As correções se aplicam à recepção bloqueante e à incremental; a recepção incremental continua dependendo de habilitação explícita. Veja [CHANGELOG.md](CHANGELOG.md) e os detalhes das correções da v5 abaixo.
 
+## Migração para v5.0.0: perfil de recepção na compilação
+
+`MQTT_ENABLE_INCREMENTAL_RX` tem padrão **0**: compila somente a recepção bloqueante clássica, mantendo o modelo de recepção próximo da biblioteca original e excluindo o estado/código incremental. Para incluir o suporte incremental, defina **1** em todo o build e depois chame `setRxBufferSize()` em execução:
+
+```ini
+build_flags =
+    -DMQTT_ENABLE_INCREMENTAL_RX=1
+```
+
+O perfil bloqueante remove ponteiro e dimensionamento do buffer RX dedicado, orçamento de bytes, campos e código do parser incremental e as quatro APIs `setRxBufferSize()`, `getRxBufferSize()`, `setMaxBytesPerLoop()` e `getMaxBytesPerLoop()`. Usar uma dessas APIs nesse perfil gera erro de compilação, sem fallback silencioso. Permanecem validação de pacotes bloqueantes, prazos de pacote, proteção de callbacks, integridade dos pacotes de saída e controle de QoS 2. O `static_assert` aceita somente 0 ou 1.
+
+Aplique a definição consistentemente à biblioteca e a todos os consumidores nas flags globais do projeto e recompile os arquivos afetados: o layout da classe muda. A seleção de recepção do wrapper, isoladamente, não remove o recurso da biblioteca. Com `vxc-ino-mqtt`, combine `MQTT_ENABLE_INCREMENTAL_RX=0` com `VXC_MQTT_RX_BLOCKING=1`; modo incremental no wrapper com o recurso desativado na biblioteca gera erro de compilação. Para o modo incremental no wrapper, combine explicitamente `MQTT_ENABLE_INCREMENTAL_RX=1` com `VXC_MQTT_RX_BLOCKING=0`. Aplicações que usam APIs incrementais devem adicionar a flag da biblioteca antes de recompilar.
+
+Nos testes, `make test` cobre o perfil bloqueante padrão. Depois de limpar o build, execute `make test CPPFLAGS=-DMQTT_ENABLE_INCREMENTAL_RX=1` para cobrir também os cenários incrementais. As verificações de configuração validam o padrão e a disponibilidade da API incremental em cada perfil.
+
 ## Resiliência e operação não bloqueante (v4)
 
 Os recursos opcionais abaixo preservam os padrões clássicos. Por padrão, um pacote recebido que exceda o buffer encerra a conexão (veja `setOversizedPolicy`). As correções de escrita de saída são aplicadas automaticamente, incluindo o tratamento de falhas no nível do pacote da v4.0.2.
 
-- **Recepção não bloqueante, habilitada explicitamente.** Por padrão, a recepção é síncrona: uma única chamada a `loop()` pode bloquear durante a leitura de um pacote. Para firmwares que precisam continuar respondendo, por exemplo, a um botão que abre um portão usando dados locais enquanto o broker está indisponível, habilite a recepção incremental com um buffer dedicado:
+- **Recepção não bloqueante, habilitada explicitamente.** Por padrão, a recepção é síncrona: uma única chamada a `loop()` pode bloquear durante a leitura de um pacote. Para firmwares que precisam continuar respondendo, por exemplo, a um botão que abre um portão usando dados locais enquanto o broker está indisponível, compile com `MQTT_ENABLE_INCREMENTAL_RX=1` e habilite a recepção incremental com um buffer dedicado:
 
   ```c
   client.setRxBufferSize(512);     // buffer RX dedicado; habilita recepção não bloqueante
@@ -130,7 +146,7 @@ A recepção incremental prioriza a resposta rápida das escritas automáticas d
 
 Essa política remove os retries da biblioteca dessas escritas automáticas; não torna todas as chamadas de `loop()` nem operações de rede não bloqueantes. A primeira chamada a `Client::write()` ainda pode bloquear internamente. CONNECT, SUBSCRIBE, UNSUBSCRIBE, `publish()`, `publish_P()` e publicação manual mantêm suas tentativas síncronas mesmo com recepção incremental; portanto, publicar dentro de um callback ainda pode atrasar `loop()`. No modo bloqueante, as tentativas cedem CPU às tarefas da plataforma, mas as funções da aplicação ficam adiadas até o retorno. Atender ao watchdog não garante os prazos de resposta das entradas ou saídas locais. Valide a latência sob congestionamento e falhas de rede no hardware de destino em relação aos prazos exigidos pelo produto.
 
-`make test` também executa `tests/check_config.py` para verificar limites aceitos e rejeitados na compilação, usando a biblioteca padrão do Python 3 e o compilador C++ configurado. Para executar separadamente a partir de `tests/`, use `make config-test` ou `python3 check_config.py --compiler g++`. As regressões em execução ficam em `resilience_spec.cpp`, incluindo os dois modos de recepção, bytes exatos das respostas, contagem de chamadas da tentativa única, adiamento e confirmação de PINGREQ, ausência de processamento de RX após falha de ping, retries de publicação síncrona, restauração do timeout e reutilização dos slots de QoS 2. Um relógio com escopo limitado aos testes de host exercita os prazos sem esperas reais longas. A suíte de keepalive também avança segundos simulados explicitamente, para que o escalonamento do host não desloque os horários esperados dos pings; as demais suítes mantêm seu comportamento de relógio existente. Repita a suíte com `MQTT_RX_QOS2_MAX_INFLIGHT=4`, `MQTT_SOCKET_TIMEOUT=1` e `MQTT_MAX_TRANSFER_SIZE=4`, aplicando cada definição também à biblioteca.
+`make test` também executa `tests/check_config.py` para verificar limites aceitos e rejeitados na compilação, usando a biblioteca padrão do Python 3 e o compilador C++ configurado. Para executar separadamente a partir de `tests/`, use `make config-test` ou `python3 check_config.py --compiler g++`. As regressões em execução ficam em `resilience_spec.cpp`, incluindo os dois modos de recepção, bytes exatos das respostas, contagem de chamadas da tentativa única, adiamento e confirmação de PINGREQ, ausência de processamento de RX após falha de ping, retries de publicação síncrona, restauração do timeout e reutilização dos slots de QoS 2. Um relógio com escopo limitado aos testes de host exercita os prazos sem esperas reais longas. A suíte de keepalive também avança segundos simulados explicitamente, para que o escalonamento do host não desloque os horários esperados dos pings; as demais suítes mantêm seu comportamento de relógio existente. Repita a suíte com `MQTT_ENABLE_INCREMENTAL_RX=1`, `MQTT_RX_QOS2_MAX_INFLIGHT=4`, `MQTT_SOCKET_TIMEOUT=1` e `MQTT_MAX_TRANSFER_SIZE=4`, aplicando cada definição também à biblioteca.
 
 ## Exemplos
 

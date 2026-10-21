@@ -9,9 +9,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
-## [5.0.0] - 2026-10-20
+## [5.0.0] - 2026-10-21
 
 ### Changed
+
+- Add build-wide `MQTT_ENABLE_INCREMENTAL_RX` (default 0). The default blocking-only build removes incremental RX fields, parser and APIs while retaining blocking safety protections; incremental APIs require an explicit opt-in with value 1, and all translation units must use the same setting and be rebuilt. Update tests for both feature profiles and compile-time API availability.
 
 - Automatic protocol writes now select retry policy from receive mode: incremental receive makes one transport attempt; blocking receive retains short-write completion. This trades transient-congestion recovery for fewer internal waits in incremental mode. Transport calls and callback publishes can still block; document the remaining latency limits. No pending-TX buffers, heap allocations or per-client state are added.
 - `setSocketTimeout(0)` now restores `MQTT_SOCKET_TIMEOUT` (default 15 seconds), rather than expiring immediately. Explicit positive timeouts, including two seconds, retain their meaning; `setPacketTimeout(0)` still falls back to the socket timeout. Validate the compile-time socket timeout and incoming QoS 2 capacity with `static_assert` (1 through 65535); keep one QoS 2 slot by default.
@@ -31,7 +33,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 ### Tests
 
 - Replace wall-clock sleeps in keepalive regressions with explicitly advanced host-test time, preserving scenarios while removing scheduling-dependent ping expectations.
-- Exercise complete, recoverable partial, stalled partial and zero-byte writes for all five required replies in both receive modes, asserting exactly one transport call in incremental mode. Cover PINGREQ mode selection, zero-byte deferral, acknowledgement, reconnection and no RX after a failed ping. Confirm synchronous publish retries remain enabled with incremental RX. Verify default/explicit/reset socket timeouts and packet-timeout fallback with a scoped host clock; replace the old zero-timeout fixture with one second. Expand QoS 2 capacity tests for duplicates, slot reuse and no acknowledgement on overflow; run with one and four slots. Add `check_config.py` to `make test` for twelve accepted/rejected compile-time configurations, using only Python 3's standard library.
+- Exercise complete, recoverable partial, stalled partial and zero-byte writes for all five required replies in both receive modes, asserting exactly one transport call in incremental mode. Cover PINGREQ mode selection, zero-byte deferral, acknowledgement, reconnection and no RX after a failed ping. Confirm synchronous publish retries remain enabled with incremental RX. Verify default/explicit/reset socket timeouts and packet-timeout fallback with a scoped host clock; replace the old zero-timeout fixture with one second. Expand QoS 2 capacity tests for duplicates, slot reuse and no acknowledgement on overflow; run with one and four slots. Add `check_config.py` to `make test` for eighteen accepted/rejected compile-time configurations, using only Python 3's standard library.
 - Add `resilience_spec` for callback lifetime, ownership, parser recovery, manual publishing, limits and QoS 2 sessions in both receive modes where applicable; correct packet expectations and use `size_t` counters in the mock transport.
 - `publish_spec`: a publish whose every write is short still delivers the exact same bytes; a write that places nothing fails the publish but keeps the connection; a partial write of the header, and of the payload, each close the connection (`MQTT_CONNECTION_LOST`). `connect_spec`: a partial CONNECT write fails the connect and closes the socket
 - `ShimClient`: `setWriteLimit()` simulates a socket that stops accepting bytes, `setWriteChunk()` one that accepts only a few bytes per call

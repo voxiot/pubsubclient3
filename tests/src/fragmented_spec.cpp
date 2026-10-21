@@ -5,6 +5,7 @@
 #include "Stream.h"
 #include "trace.h"
 
+#if MQTT_ENABLE_INCREMENTAL_RX
 // Non-blocking incremental receive (setRxBufferSize()): verify that a packet split across many loop() calls
 // (one or a few bytes available at a time) is reassembled correctly without blocking, that the per-loop byte
 // budget is honored, and that an oversized packet is dropped incrementally while the connection stays in sync.
@@ -277,3 +278,16 @@ int main() {
 
     FINISH
 }
+
+#else
+static int test_blocking_profile() {
+    IT("incremental RX is excluded from this build");
+    IS_EQUAL(MQTT_ENABLE_INCREMENTAL_RX, 0);
+    END_IT
+}
+int main() {
+    SUITE("Blocking-only receive profile");
+    test_blocking_profile();
+    FINISH
+}
+#endif

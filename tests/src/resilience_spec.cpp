@@ -47,8 +47,10 @@ static void received(char*, uint8_t*, size_t) {
     if (disconnectInCallback) {
         current->disconnect();
         callbackChecks = current->getRxQos() == MQTT_QOS1 &&
-                         !current->setBufferSize(0) && !current->setRxBufferSize(0) &&
-                         !current->connect("nested");
+                         !current->setBufferSize(0) && !current->connect("nested");
+#if MQTT_ENABLE_INCREMENTAL_RX
+        callbackChecks = callbackChecks && !current->setRxBufferSize(0);
+#endif
     }
     if (publishInCallback) callbackChecks = current->publish("reply", "ok");
     if (incompleteInCallback) callbackChecks = current->beginPublish("reply", 2, false);
@@ -61,7 +63,11 @@ struct Fixture {
         calls = 0; current = &mqtt; callbackChecks = false;
         disconnectInCallback = publishInCallback = incompleteInCallback = false;
         mqtt.setSocketTimeout(1); mqtt.setKeepAlive(0);
+#if MQTT_ENABLE_INCREMENTAL_RX
         if (incremental) mqtt.setRxBufferSize(64);
+#else
+        (void)incremental;
+#endif
     }
     bool connect(const char* id = "test", bool clean = true, bool present = false) {
         mqtt.connected(); // let the previous transport loss be observed before the new CONNACK arrives
@@ -81,7 +87,9 @@ static int callback_lifetime(bool incremental) {
     IS_EQUAL(calls, 1u); IS_TRUE(callbackChecks);
     IS_EQUAL(f.socket.wire.size(), 2u); // only DISCONNECT, no ACK after it
     IS_TRUE(f.mqtt.setBufferSize(0));
+#if MQTT_ENABLE_INCREMENTAL_RX
     IS_TRUE(f.mqtt.setRxBufferSize(0));
+#endif
     END_IT
 }
 
@@ -155,7 +163,10 @@ static int manual_publish(bool incremental) {
     IS_EQUAL(f.socket.wire.size(), header);
     IS_FALSE(f.mqtt.subscribe("sub")); IS_FALSE(f.mqtt.unsubscribe("sub"));
     IS_FALSE(f.mqtt.beginPublish("other", 0, false));
-    IS_FALSE(f.mqtt.setBufferSize(512)); IS_FALSE(f.mqtt.setRxBufferSize(128));
+    IS_FALSE(f.mqtt.setBufferSize(512));
+#if MQTT_ENABLE_INCREMENTAL_RX
+    IS_FALSE(f.mqtt.setRxBufferSize(128));
+#endif
     IS_EQUAL(f.mqtt.write((const uint8_t*)"bc", 2), 2u);
     IS_TRUE(f.mqtt.endPublish());
     IS_EQUAL(f.socket.wire.size(), header + 3);
@@ -250,7 +261,7 @@ static int qos2_capacity(bool incremental) {
 
 static int qos2_session() {
     IT("QoS2 IDs survive only a confirmed persistent session for the same client and broker");
-    Fixture f(true); IS_TRUE(f.connect("persistent", false));
+    Fixture f(MQTT_ENABLE_INCREMENTAL_RX != 0); IS_TRUE(f.connect("persistent", false));
     f.socket.queue({0x34, 6, 0, 1, 't', 0, 7, 'x'});
     IS_TRUE(f.mqtt.loop()); IS_EQUAL(calls, 1u);
     f.socket.stop();
@@ -300,7 +311,7 @@ static int unfinished_callback_publish(bool incremental) {
 
 static int manual_transport_loss() {
     IT("connect observes a transport loss during manual PUBLISH before starting a fresh session");
-    Fixture f(true); IS_TRUE(f.connect());
+    Fixture f(MQTT_ENABLE_INCREMENTAL_RX != 0); IS_TRUE(f.connect());
     IS_TRUE(f.mqtt.beginPublish("t", 2, false));
     f.socket.stop();
     // Fixture.connect() intentionally observes connected(); exercise direct connect here instead.
@@ -448,7 +459,9 @@ static int socket_timeout_defaults(bool incremental) {
         WireClient socket;
         PubSubClient mqtt("broker", 1883, received, socket);
         mqtt.setKeepAlive(0);
+#if MQTT_ENABLE_INCREMENTAL_RX
         if (incremental) IS_TRUE(mqtt.setRxBufferSize(64));
+#endif
         if (setting == 1) mqtt.setSocketTimeout(2);
         if (setting == 2) mqtt.setSocketTimeout(2).setSocketTimeout(0);
         if (setting == 3) mqtt.setSocketTimeout(2).setPacketTimeout(1).setPacketTimeout(0);
@@ -479,14 +492,32 @@ static int socket_timeout_defaults(bool incremental) {
     END_IT
 }
 
+static int connect_wait_uses_socket_timeout() {
+    IT("a ten-second packet timeout does not extend the wait for the first CONNACK byte");
+    TestClock clock;
+    Fixture f(false);
+    f.mqtt.setSocketTimeout(2).setPacketTimeout(10);
+    const unsigned long start = peekTestMillis();
+    IS_FALSE(f.mqtt.connect("no-connack"));
+    IS_EQUAL(f.mqtt.state(), MQTT_CONNECTION_TIMEOUT);
+    IS_TRUE(peekTestMillis() - start >= 2000UL);
+    IS_TRUE(peekTestMillis() - start < 2100UL);
+    IS_EQUAL(f.mqtt.getPacketTimeout(), 10u);
+    END_IT
+}
+
 int main(int argc, char** argv) {
     SUITE("Session, memory and packet integrity regressions");
     if (argc > 1 && strcmp(argv[1], "--callback-only") == 0) {
         callback_lifetime(false);
         FINISH
     }
-    ownership(); blocking_timeout(); reconnect_resets_rx(); publish_lengths(); length_overflow(); topic_limits(); qos2_session(); manual_transport_loss();
-    for (int mode = 0; mode < 2; ++mode) {
+    ownership(); blocking_timeout(); connect_wait_uses_socket_timeout();
+#if MQTT_ENABLE_INCREMENTAL_RX
+    reconnect_resets_rx();
+#endif
+    publish_lengths(); length_overflow(); topic_limits(); qos2_session(); manual_transport_loss();
+    for (int mode = 0; mode <= MQTT_ENABLE_INCREMENTAL_RX; ++mode) {
         if (argc == 1) callback_lifetime(mode != 0);
         malformed_qos_recovers(mode != 0); manual_publish(mode != 0);
         incoming_budget(mode != 0); qos2_dedup(mode != 0); qos2_capacity(mode != 0); callback_publish(mode != 0);

@@ -17,7 +17,7 @@ all: $(TEST_BIN)
 
 ${OUT_PATH}/%: ${SRC_PATH}/%.cpp ${PSC_FILE} ${SHIM_FILES}
 	mkdir -p ${OUT_PATH}
-	${CC} ${CFLAGS} $^ -o $@
+	${CC} ${CPPFLAGS} ${CFLAGS} $^ -o $@
 
 clean:
 	@rm -rf ${OUT_PATH}

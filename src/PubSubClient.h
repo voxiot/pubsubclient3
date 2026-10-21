@@ -212,6 +212,14 @@ static_assert(MQTT_SOCKET_TIMEOUT >= 1 && MQTT_SOCKET_TIMEOUT <= 65535,
 #endif
 /// \endcond
 
+// Build-wide feature selection. Define consistently for the library and every consumer.
+// 0 removes incremental RX fields, parser and APIs; blocking RX safety checks remain enabled.
+#ifndef MQTT_ENABLE_INCREMENTAL_RX
+#define MQTT_ENABLE_INCREMENTAL_RX 0
+#endif
+static_assert(MQTT_ENABLE_INCREMENTAL_RX == 0 || MQTT_ENABLE_INCREMENTAL_RX == 1,
+              "MQTT_ENABLE_INCREMENTAL_RX must be 0 or 1");
+
 // Fixed incoming QoS 2 handshake slots; define consistently in every translation unit.
 #ifndef MQTT_RX_QOS2_MAX_INFLIGHT
 #define MQTT_RX_QOS2_MAX_INFLIGHT 1
@@ -234,7 +242,8 @@ class PubSubClient : public Print {
     uint16_t _rxQos2Ids[MQTT_RX_QOS2_MAX_INFLIGHT]{};
     char* _qos2ClientId{};  // allocated only for persistent sessions; no payload is retained
     size_t _maxIncomingPacket{};  // max accepted incoming packet size; 0 = limit to _bufferSize (see setMaxIncomingPacket())
-    // Non-blocking receive state (opt-in via setRxBufferSize()). When _rxBuffer is set and no Stream is used,
+#if MQTT_ENABLE_INCREMENTAL_RX
+    // Non-blocking receive state (opt-in via setRxBufferSize()), also compatible with Stream.
     // loop() reassembles incoming packets incrementally into this dedicated buffer across calls, so the main
     // loop never blocks waiting for bytes. The buffer is dedicated to RX, so outgoing traffic on _buffer
     // (publish/keepalive) can never corrupt an in-progress reassembly.
@@ -243,12 +252,15 @@ class PubSubClient : public Print {
     size_t _maxBytesPerLoop{};         // max bytes processed per loop() in non-blocking mode; 0 = all available (see setMaxBytesPerLoop())
     uint8_t _rxState{};                // RxState: current state of the incremental receive FSM
     uint8_t _rxHdrLen{};               // number of remaining-length bytes of the packet being received
+#endif
     uint8_t _oversizedPolicy{};        // MQTT_OVERSIZED_DISCONNECT (default) or MQTT_OVERSIZED_IGNORE (see setOversizedPolicy())
+#if MQTT_ENABLE_INCREMENTAL_RX
     uint32_t _rxMultiplier{};          // remaining-length varint multiplier carried across loop() calls
     size_t _rxLen{};                   // bytes written into _rxBuffer so far
     size_t _rxLength{};                // decoded remaining length of the packet being received
     size_t _rxRemaining{};             // payload bytes still to be received
     size_t _rxStreamSkip{};            // index within the remaining length at which the payload (streamed bytes) begins
+#endif
     unsigned long _packetReadStart{};  // millis() when the current packet started, used as overall packet read deadline
     unsigned long _keepAliveMillis{};
     unsigned long _socketTimeoutMillis{};
@@ -265,19 +277,23 @@ class PubSubClient : public Print {
     Stream* _stream{};
     int _state{MQTT_DISCONNECTED};
 
+#if MQTT_ENABLE_INCREMENTAL_RX
     // States of the non-blocking incremental receive FSM (see processInbound()).
     // RX_PAYLOAD stores the packet into _rxBuffer and, when a Stream is set, also writes payload bytes to it.
     // RX_DISCARD drops the payload of an oversized packet incrementally (no Stream), keeping the connection in
     // sync (the documented "ignore oversized packet" behavior) without ever blocking the loop.
     enum RxState : uint8_t { RX_IDLE = 0, RX_HEADER, RX_PAYLOAD, RX_DISCARD };
 
+#endif
     void resetReceiveState();
     void closeConnection(int reason);
     void clearQos2Session();
     size_t readPacket(uint8_t* hdrLen);
     bool handlePacket(uint8_t* buf, size_t bufSize, uint8_t hdrLen, size_t length);
+#if MQTT_ENABLE_INCREMENTAL_RX
     bool processInbound();
     bool dispatchInbound();
+#endif
     bool readByte(uint8_t* result);
     bool readByte(uint8_t* result, size_t* pos);
     uint8_t buildHeader(uint8_t header, size_t length);
@@ -560,6 +576,7 @@ class PubSubClient : public Print {
      */
     size_t getMaxIncomingPacket();
 
+#if MQTT_ENABLE_INCREMENTAL_RX
     /**
      * @brief Enables non-blocking receive by allocating a dedicated receive buffer, or disables it.
      * When a receive buffer is set, loop() reassembles incoming packets incrementally into it, consuming only
@@ -575,8 +592,7 @@ class PubSubClient : public Print {
      * @note Opt-in: if never called, the client keeps the classic blocking behavior and allocates no extra RAM.
      * Allocate once, early (before TLS), to avoid heap fragmentation. On allocation failure the previous state
      * is kept and the client stays usable (it falls back to the blocking path when no receive buffer exists).
-     * @note Phase 1: the non-blocking path is used only when no Stream is set (see setStream()); with a Stream
-     * the classic blocking path is used.
+     * @note Available only when MQTT_ENABLE_INCREMENTAL_RX=1. Stream payload output is incremental too.
      */
     bool setRxBufferSize(size_t size);
 
@@ -602,6 +618,7 @@ class PubSubClient : public Print {
      * @return The per-loop byte budget, or 0 if all available bytes are processed each call.
      */
     size_t getMaxBytesPerLoop();
+#endif
 
     /**
      * @brief Sets how an incoming packet that does not fit the receive buffer is handled.

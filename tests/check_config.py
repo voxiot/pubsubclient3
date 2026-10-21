@@ -20,10 +20,24 @@ def main():
         for value in values:
             cases.append((f'{macro}={value}', [f'-D{macro}={value}'],
                           1 <= value <= 65535, diagnostic))
+    for value in (0, 1, -1, 2):
+        cases.append((f'MQTT_ENABLE_INCREMENTAL_RX={value}',
+                      [f'-DMQTT_ENABLE_INCREMENTAL_RX={value}'], value in (0, 1),
+                      'MQTT_ENABLE_INCREMENTAL_RX must be 0 or 1'))
+    cases.extend([
+        ('api-disabled', ['-DMQTT_ENABLE_INCREMENTAL_RX=0'], False, 'setRxBufferSize'),
+        ('api-enabled', ['-DMQTT_ENABLE_INCREMENTAL_RX=1'], True, ''),
+    ])
     with tempfile.TemporaryDirectory(prefix='pubsub-config-') as temporary:
         source = Path(temporary) / 'config.cpp'
         source.write_text('#include "PubSubClient.h"\n', encoding='utf-8')
         for name, defines, should_compile, diagnostic in cases:
+            probe = '#include "PubSubClient.h"\n'
+            if name == 'defaults':
+                probe += 'static_assert(MQTT_ENABLE_INCREMENTAL_RX == 0, "default RX must be blocking-only");\n'
+            if name.startswith('api-'):
+                probe += 'void check(PubSubClient& c) { c.setRxBufferSize(64); }\n'
+            source.write_text(probe, encoding='utf-8')
             result = subprocess.run(
                 [args.compiler, '-std=c++11', '-fsyntax-only',
                  '-I' + str(tests / 'src/lib'), '-I' + str(tests.parent / 'src'),
@@ -32,7 +46,7 @@ def main():
             if (result.returncode == 0) != should_compile or (
                     not should_compile and diagnostic not in output):
                 raise SystemExit(f'FAIL {name}\n{output}')
-            print(f'PASS {name}: ' + ('accepted' if should_compile else 'rejected by static_assert'))
+            print(f'PASS {name}: ' + ('accepted' if should_compile else 'rejected as expected'))
     print(f'{len(cases)}/{len(cases)} configuration checks passed')
 
 

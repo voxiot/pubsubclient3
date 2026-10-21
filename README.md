@@ -18,20 +18,36 @@ Starting with **v4.0.0**, this repository (`voxiot/pubsubclient3`) **diverges** 
 
 ## Why version 5.0.0? Migration from v4
 
-Version **5.0.0** is a major release because the packet and session integrity fixes intentionally break two previously accepted usage patterns. Although existing method signatures are preserved, this is not a fully backward-compatible patch:
+Version **5.0.0** is a major release because the packet and session integrity fixes intentionally change previously accepted usage patterns. Although existing method signatures are preserved, this is not a fully backward-compatible patch:
 
+- **Incremental receive requires a build flag.** The default build excludes incremental RX state, parser and APIs. Existing incremental consumers must define `MQTT_ENABLE_INCREMENTAL_RX=1` consistently for library and application, rebuild, and keep calling `setRxBufferSize()` at runtime. See the receive profile below.
 - **Client copying is prohibited.** Copy construction and copy assignment are deleted because they duplicated owning pointers and could cause double frees. Pass `PubSubClient` by reference or pointer; create and configure a separate instance when an independent client is needed.
 - **Manual publishing is an explicit packet transaction.** Every successful `beginPublish()` must be followed by exactly the announced number of payload bytes and `endPublish()`, including for an empty payload. `write()` outside a transaction returns zero; a write exceeding the remaining payload is rejected in full. Ending with missing bytes closes the connection with `MQTT_CONNECTION_LOST`.
 
 While a manual publish is active, `loop()` checks the connection but defers receive and keepalive processing; nested publishes, subscribe/unsubscribe, reconnect and buffer changes are refused. Finish the transaction promptly, and finish a manual publish started inside a callback before returning. Buffer changes and reconnect are also refused for the callback's lifetime. These restrictions prevent other MQTT packets from becoming bytes of an unfinished payload and prevent access to invalidated buffers.
 
-Applications that already keep clients by reference/pointer and complete each manual publish normally require no changes for these two migration points. The release also resets parser state across connections, validates lengths and identifiers, and tracks incoming QoS 2 duplicates. These fixes apply to both blocking and incremental receive; incremental receive remains opt-in. See [CHANGELOG.md](CHANGELOG.md) and the v5 safety details below.
+Applications that already keep clients by reference/pointer and complete each manual publish normally require no changes for the copying and manual-publish migration points. The release also resets parser state across connections, validates lengths and identifiers, and tracks incoming QoS 2 duplicates. These fixes apply to both blocking and incremental receive; incremental receive remains opt-in. See [CHANGELOG.md](CHANGELOG.md) and the v5 safety details below.
+
+## Migration to v5.0.0: compile-time receive profile
+
+`MQTT_ENABLE_INCREMENTAL_RX` defaults to **0**: only classic blocking receive is compiled, keeping the receive model close to the original library and excluding incremental RX state/code. To opt in to incremental support, define **1** for the entire build, then call `setRxBufferSize()` at runtime:
+
+```ini
+build_flags =
+    -DMQTT_ENABLE_INCREMENTAL_RX=1
+```
+
+The blocking-only profile removes the dedicated RX pointer/buffer sizing, byte budget, incremental parser fields and code, and the four APIs `setRxBufferSize()`, `getRxBufferSize()`, `setMaxBytesPerLoop()` and `getMaxBytesPerLoop()`. Using one of these APIs in that profile is a compile error, not a silent fallback. Blocking packet validation, packet deadlines, callback guards, outgoing packet integrity and QoS 2 tracking remain available. `static_assert` accepts only 0 or 1.
+
+Apply the definition consistently to the library and all consumers through project-wide build flags and rebuild all affected files: it changes class layout. A wrapper's runtime/compile-time receive selection alone does not remove the library feature. With `vxc-ino-mqtt`, pair `MQTT_ENABLE_INCREMENTAL_RX=0` with `VXC_MQTT_RX_BLOCKING=1`; incremental wrapper mode with the library feature disabled is rejected at compile time. For incremental wrapper mode, explicitly pair `MQTT_ENABLE_INCREMENTAL_RX=1` with `VXC_MQTT_RX_BLOCKING=0`. Existing applications using incremental APIs must add the library flag before rebuilding.
+
+For tests, `make test` covers the default blocking-only build. After cleaning, run `make test CPPFLAGS=-DMQTT_ENABLE_INCREMENTAL_RX=1` to cover incremental scenarios too. Configuration checks verify the default and the availability of the incremental API in each profile.
 
 ## Resilience and non-blocking operation (v4)
 
 Optional features below preserve the classic defaults. An oversized incoming packet disconnects by default (see `setOversizedPolicy`), and outgoing-write safety fixes apply automatically, including the packet-level failure handling in v4.0.2.
 
-- **Non-blocking receive (opt-in).** By default the receive path is synchronous: a single `loop()` call can block while a packet is being read. For firmware that must stay responsive (e.g. a button that opens a gate from local memory while the broker is down), enable incremental receive with a dedicated buffer:
+- **Non-blocking receive (opt-in).** By default the receive path is synchronous: a single `loop()` call can block while a packet is being read. For firmware that must stay responsive (e.g. a button that opens a gate from local memory while the broker is down), compile with `MQTT_ENABLE_INCREMENTAL_RX=1`, then enable incremental receive with a dedicated buffer:
 
   ```c
   client.setRxBufferSize(512);     // dedicated RX buffer; enables non-blocking receive
@@ -131,7 +147,7 @@ Incremental receive prioritizes responsiveness of automatic protocol writes over
 
 This policy removes library retries from these automatic writes; it does not make every `loop()` call or network operation non-blocking. The first `Client::write()` call can still block internally. CONNECT, SUBSCRIBE, UNSUBSCRIBE, `publish()`, `publish_P()` and manual publishing keep their synchronous retry behavior even when incremental receive is enabled; a publish inside a callback can therefore delay `loop()`. In blocking mode, retries yield to platform tasks, but application work is delayed until the call returns. Servicing the watchdog does not guarantee response deadlines for local inputs or outputs. Validate latency under congestion and network faults on the target hardware against the product's required deadlines.
 
-`make test` also runs `tests/check_config.py` to check accepted and rejected compile-time limits; it uses Python 3's standard library and the configured C++ compiler. Run it separately from `tests/` with `make config-test` or `python3 check_config.py --compiler g++`. Runtime regressions are in `resilience_spec.cpp`, including both receive modes, exact response bytes, single-attempt call counts, PINGREQ deferral and acknowledgement, no RX dispatch after a failed ping, synchronous publish retries, timeout fallback and QoS 2 slot reuse. A scoped host-only clock exercises deadlines without long real waits. The keepalive suite also advances simulated seconds explicitly so host scheduling cannot shift expected ping times; other suites retain their existing clock behavior. Repeat the suite with `MQTT_RX_QOS2_MAX_INFLIGHT=4`, `MQTT_SOCKET_TIMEOUT=1`, and `MQTT_MAX_TRANSFER_SIZE=4` (each definition must also apply to the library).
+`make test` also runs `tests/check_config.py` to check accepted and rejected compile-time limits; it uses Python 3's standard library and the configured C++ compiler. Run it separately from `tests/` with `make config-test` or `python3 check_config.py --compiler g++`. Runtime regressions are in `resilience_spec.cpp`, including both receive modes, exact response bytes, single-attempt call counts, PINGREQ deferral and acknowledgement, no RX dispatch after a failed ping, synchronous publish retries, timeout fallback and QoS 2 slot reuse. A scoped host-only clock exercises deadlines without long real waits. The keepalive suite also advances simulated seconds explicitly so host scheduling cannot shift expected ping times; other suites retain their existing clock behavior. Repeat the suite with `MQTT_ENABLE_INCREMENTAL_RX=1`, `MQTT_RX_QOS2_MAX_INFLIGHT=4`, `MQTT_SOCKET_TIMEOUT=1`, and `MQTT_MAX_TRANSFER_SIZE=4` (each definition must also apply to the library).
 
 ## Examples
 
