@@ -5,6 +5,9 @@
 This library provides a client for doing simple publish/subscribe messaging with
 a server that supports MQTT.
 
+> [!IMPORTANT]
+> **Hardware validation: ESP8266 only.** From version **3.3.2-b** onward, hardware testing of this fork has been performed only on **ESP8266**. Other platforms, including ESP32, have not been validated for these changes. Host regression tests and successful compilation do not establish hardware compatibility; validate the target platform and its network transport before production use.
+
 ## Notes of this fork
 
 This library descends from [knolleary/pubsubclient v2.8](https://github.com/knolleary/pubsubclient/releases/tag/v2.8) and the maintained fork [hmueller01/pubsubclient3](https://github.com/hmueller01/pubsubclient3).

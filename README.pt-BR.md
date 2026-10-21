@@ -4,6 +4,9 @@
 
 Esta biblioteca fornece um cliente para troca de mensagens por publicação e assinatura com um servidor que suporte MQTT.
 
+> [!IMPORTANT]
+> **Validação em hardware: somente ESP8266.** A partir da versão **3.3.2-b**, os testes em hardware deste fork foram realizados somente no **ESP8266**. As demais plataformas, incluindo ESP32, não foram validadas para essas alterações. Testes de regressão em host e compilação bem-sucedida não comprovam compatibilidade em hardware; valide a plataforma de destino e seu transporte de rede antes do uso em produção.
+
 ## Notas deste fork
 
 Esta biblioteca deriva de [knolleary/pubsubclient v2.8](https://github.com/knolleary/pubsubclient/releases/tag/v2.8) e do fork mantido [hmueller01/pubsubclient3](https://github.com/hmueller01/pubsubclient3).
