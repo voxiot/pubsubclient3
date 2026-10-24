@@ -6,6 +6,16 @@ Todas as alterações relevantes deste projeto serão documentadas neste arquivo
 
 O formato é baseado em [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), e este projeto segue o [Versionamento Semântico](https://semver.org/).
 
+## [Unreleased]
+
+### Testes
+
+- Adicionar sequências determinísticas de PUBLISH/SUBSCRIBE/PING/UNSUBSCRIBE com
+  escritas parciais e de zero bytes no transporte. Comparar todo o fluxo com
+  pacotes esperados literais, impedir novas escritas após um pacote interrompido
+  e verificar recuperação em uma conexão nova. Executar com RX bloqueante e
+  incremental, com e sem `MQTT_MAX_TRANSFER_SIZE=32`; sem alteração no firmware.
+
 ## [6.0.1] - 2026-10-24
 
 ### Corrigido

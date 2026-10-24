@@ -33,6 +33,31 @@ This will create a set of executables in `./bin/`. Run each of these executables
 
 *Note:* the `connect_spec` and `keepalive_spec` tests involve testing keepalive timers so naturally take a few minutes to run through.
 
+## Outgoing packet sequence matrix
+
+`sequence_spec` checks 64 deterministic write schedules per active receive mode.
+Each successful sequence has a multi-byte Remaining Length PUBLISH, SUBSCRIBE,
+PINGREQ/PINGRESP, UNSUBSCRIBE and another PUBLISH. Expected packet bytes are
+literal fixtures, including packet identifiers. Zero writes between partial
+writes must not drop or duplicate bytes. Incremental PINGREQ keeps its single
+attempt policy: its successful case accepts both bytes; a partial ping must close.
+
+Separate interruption cases stall a PUBLISH header/payload, SUBSCRIBE,
+UNSUBSCRIBE or PINGREQ. They assert one close with `MQTT_WRITE_INCOMPLETE`, no
+additional transport writes from subsequent operations, and an intact PUBLISH
+after reconnect. The 180-byte payload also crosses transfer-chunk boundaries.
+
+Use GNU Make and force rebuilding when changing compile flags:
+
+```sh
+make -B test CPPFLAGS="-DMQTT_ENABLE_INCREMENTAL_RX=0"
+make -B test CPPFLAGS="-DMQTT_ENABLE_INCREMENTAL_RX=1"
+make -B test CPPFLAGS="-DMQTT_ENABLE_INCREMENTAL_RX=0 -DMQTT_MAX_TRANSFER_SIZE=32"
+make -B test CPPFLAGS="-DMQTT_ENABLE_INCREMENTAL_RX=1 -DMQTT_MAX_TRANSFER_SIZE=32"
+```
+
+These are host transport fault-injection tests, not hardware or broker validation.
+
 ## Arduino tests
 
 The `resilience_spec` executable includes self-presence regressions with the real

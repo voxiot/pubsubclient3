@@ -33,3 +33,4 @@ test: all config-test
 	@bin/keepalive_spec
 	@bin/fragmented_spec
 	@bin/resilience_spec
+	@bin/sequence_spec
