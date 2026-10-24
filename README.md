@@ -237,6 +237,9 @@ Existing state numbers remain reserved. Known local failures now use these codes
 | -8 | `MQTT_PUBLISH_INCOMPLETE` | Manual PUBLISH abandoned at endPublish, disconnect, or callback return |
 | -9 | `MQTT_KEEPALIVE_TIMEOUT` | Outstanding ping exceeded its response deadline |
 | -10 | `MQTT_PACKET_TIMEOUT` | Incoming packet receive deadline expired |
+| -11 | `MQTT_MALFORMED_PACKET` | Existing structural validation failed, including malformed CONNACK |
+| -12 | `MQTT_PACKET_TOO_LARGE` | Receive budget exceeded under fail-fast policy, or safety limit exceeded |
+| -13 | `MQTT_QOS2_INFLIGHT_EXHAUSTED` | No free slot for a new incoming QoS 2 exchange |
 
 Update consumers that previously treated -3/-4 as exhaustive failure categories.
 Incremental receive still defers a read returning -1 despite available() instead
@@ -245,3 +248,11 @@ type (PUBACK=0x40); incomplete-write output includes sent/expected byte counts.
 These diagnostics require the existing error logging configuration. No new
 instance fields, packet buffers, allocations or automatic reconnects are added.
 A transport closure alone cannot identify a duplicate Client ID or prove Internet loss.
+
+Structural rejection logs identify invalid remaining-length encoding, missing or
+invalid topic length/QoS, missing or zero packet identifiers, and short control
+responses. Size rejections include packet/budget sizes; QoS 2 exhaustion includes
+the identifier and slot capacity. These reasons replace the old generic -1 on
+these failures. They do not tighten packet acceptance or change drain-and-ignore
+policy. A callback-requested clean disconnect remains -1; previously determined
+transport, write and timeout reasons are preserved by the receive dispatcher.

@@ -233,6 +233,7 @@ static int test_oversized_disconnect_default() {
         }
     }
     IS_TRUE(disconnected);
+    IS_EQUAL(client.state(), MQTT_PACKET_TOO_LARGE);
     IS_FALSE(callback_called);
     IS_FALSE(client.connected());
 

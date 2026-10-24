@@ -92,3 +92,10 @@ do this, the suite looks for lines that _start_ with the following:
      byte ip[] = {
 
 and replaces them with the appropriate values.
+
+The diagnostic regressions also distinguish malformed packets/CONNACK, oversized
+packets (fail-fast and beyond-sane lengths, with and without Stream), and incoming
+QoS 2 capacity exhaustion. They assert the state survives connected() observation,
+one transport close, no invalid callback/ACK delivery, and successful reconnect.
+Existing ignore-policy and callback-disconnect tests ensure those paths keep
+their original behavior and reasons.

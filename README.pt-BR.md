@@ -222,6 +222,9 @@ Os números existentes continuam reservados. Falhas locais conhecidas usam códi
 | -8 | `MQTT_PUBLISH_INCOMPLETE` | PUBLISH manual abandonado no endPublish, disconnect ou retorno do callback |
 | -9 | `MQTT_KEEPALIVE_TIMEOUT` | Ping pendente excedeu o prazo de resposta |
 | -10 | `MQTT_PACKET_TIMEOUT` | Prazo de recepção do pacote expirou |
+| -11 | `MQTT_MALFORMED_PACKET` | Falha em validação estrutural existente, incluindo CONNACK malformado |
+| -12 | `MQTT_PACKET_TOO_LARGE` | Limite de recepção excedido com política fail-fast, ou limite de segurança excedido |
+| -13 | `MQTT_QOS2_INFLIGHT_EXHAUSTED` | Nenhum slot livre para uma nova troca QoS 2 de entrada |
 
 Atualize consumidores que tratavam -3/-4 como categorias exaustivas de falha.
 A recepção incremental continua adiando uma leitura que retorna -1 apesar de
@@ -231,3 +234,12 @@ bytes enviados/esperados. Esses detalhes dependem da configuração de log de er
 existente. Não foram adicionados campos por instância, buffers, alocações ou
 reconexões automáticas. Só o fechamento do transporte não identifica Client ID
 duplicado nem comprova queda da Internet.
+
+Os logs de rejeição estrutural identificam codificação inválida do tamanho,
+comprimento de tópico/QoS inválido, identificador ausente/zero e respostas de
+controle curtas. Rejeições por tamanho informam tamanho/limite; esgotamento de
+QoS 2 informa identificador e capacidade. Esses motivos substituem o antigo -1
+nessas falhas. Os critérios de aceitação e a política de drenar e ignorar não
+mudam. Uma desconexão normal solicitada no callback continua retornando -1;
+o processamento de recepção preserva causas de transporte, escrita e timeout
+já determinadas.

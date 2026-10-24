@@ -297,9 +297,14 @@ bool PubSubClient::connect(const char* id, const char* user, const char* pass, c
                 } else {
                     _state = _buffer[3];
                 }
+            } else if (_state == MQTT_DISCONNECTED) {
+                // readPacket may already have closed with a more precise timeout/size/read reason.
+                ERROR_PSC_PRINTF_P("connect: expected four-byte CONNACK (received=%zu)\n", len);
+                closeConnection(MQTT_MALFORMED_PACKET);
+                return false;
             }
-            DEBUG_PSC_PRINTF("connect aborting due to protocol error\n");
-            _client->stop();
+            // Preserve a broker CONNACK rejection; receive failures already closed their socket.
+            if (_state > 0) closeConnection(_state);
         } else {
             _state = MQTT_CONNECT_FAILED;
         }
@@ -403,8 +408,8 @@ size_t PubSubClient::readPacket(uint8_t* hdrLen) {
     do {
         if (len == MQTT_MAX_HEADER_SIZE) {
             // Invalid remaining length encoding - kill the connection
-            DEBUG_PSC_PRINTF("readPacket detected packet of invalid length\n");
-            closeConnection(MQTT_DISCONNECTED);
+            ERROR_PSC_PRINTF_P("readPacket: malformed remaining-length encoding\n");
+            closeConnection(MQTT_MALFORMED_PACKET);
             return 0;
         }
         if (!readByte(&digit)) return 0;
@@ -433,14 +438,14 @@ size_t PubSubClient::readPacket(uint8_t* hdrLen) {
                 } else {
                     // Fail-fast: close the connection so the reconnect resynchronises the stream.
                     ERROR_PSC_PRINTF_P("readPacket disconnecting on oversized packet (%zu > budget %zu)\n", totalLen, budget);
-                    closeConnection(MQTT_DISCONNECTED);
+                    closeConnection(MQTT_PACKET_TOO_LARGE);
                     return 0;
                 }
             }
         } else if (totalLen > MQTT_MAX_SANE_PACKET_SIZE) {
             // Stream mode: payload overflow is streamed out, so only a bogus (beyond-sane) length disconnects.
             ERROR_PSC_PRINTF_P("readPacket disconnecting on bogus streamed packet (%zu)\n", totalLen);
-            closeConnection(MQTT_DISCONNECTED);
+            closeConnection(MQTT_PACKET_TOO_LARGE);
             return 0;
         }
     }
@@ -449,8 +454,8 @@ size_t PubSubClient::readPacket(uint8_t* hdrLen) {
         if (length < 2) {
             // A PUBLISH packet must at least contain the 2 topic length bytes. Reading them
             // unconditionally would consume bytes of the next packet and break framing.
-            DEBUG_PSC_PRINTF("readPacket detected malformed PUBLISH packet\n");
-            closeConnection(MQTT_DISCONNECTED);
+            ERROR_PSC_PRINTF_P("readPacket: PUBLISH missing topic-length bytes (remaining=%zu)\n", length);
+            closeConnection(MQTT_MALFORMED_PACKET);
             return 0;
         }
         // Read in topic length to calculate bytes to skip over for Stream writing
@@ -509,22 +514,39 @@ bool PubSubClient::handlePacket(uint8_t* buf, size_t bufSize, uint8_t hdrLen, si
     DEBUG_PSC_PRINTF("handlePacket(): received message of type %u\n", type);
     if (length > bufSize) {
         // This should never happen as the receive path prevents buffer overflow, but we check again here to be sure and prevent any buffer overflows.
-        DEBUG_PSC_PRINTF("handlePacket(): packet length %zu exceeds buffer size %zu\n", length, bufSize);
+        ERROR_PSC_PRINTF_P("handlePacket: received=%zu exceeds buffer=%zu\n", length, bufSize);
+        closeConnection(MQTT_PACKET_TOO_LARGE);
         return false;
     }
     switch (type) {
         case MQTTPUBLISH: {
-            if (length < (size_t)hdrLen + 3) return false;
+            if (length < (size_t)hdrLen + 3) {
+                ERROR_PSC_PRINTF_P("handlePacket: PUBLISH missing topic-length bytes (type=0x%02x length=%zu)\n", static_cast<unsigned int>(type), length);
+                closeConnection(MQTT_MALFORMED_PACKET);
+                return false;
+            }
             const uint16_t topicLen = (uint16_t)(((uint16_t)buf[hdrLen + 1] << 8) | buf[hdrLen + 2]);
             const uint8_t publishQos = MQTT_HDR_GET_QOS(buf[0]);
-            if (!topicLen || topicLen > length - ((size_t)hdrLen + 3) || publishQos > MQTT_QOS2) return false;
+            if (!topicLen || topicLen > length - ((size_t)hdrLen + 3) || publishQos > MQTT_QOS2) {
+                ERROR_PSC_PRINTF_P("handlePacket: PUBLISH invalid topic length or QoS (topic=%u qos=%u length=%zu)\n", static_cast<unsigned int>(topicLen), static_cast<unsigned int>(publishQos), length);
+                closeConnection(MQTT_MALFORMED_PACKET);
+                return false;
+            }
             size_t payloadOffset = (size_t)hdrLen + 3 + topicLen;
             uint16_t msgId = 0;
             bool duplicate = false;
             if (publishQos > MQTT_QOS0) {
-                if (length - payloadOffset < 2) return false;
+                if (length - payloadOffset < 2) {
+                    ERROR_PSC_PRINTF_P("handlePacket: PUBLISH missing packet identifier (type=0x%02x length=%zu)\n", static_cast<unsigned int>(type), length);
+                    closeConnection(MQTT_MALFORMED_PACKET);
+                    return false;
+                }
                 msgId = (uint16_t)(((uint16_t)buf[payloadOffset] << 8) | buf[payloadOffset + 1]);
-                if (!msgId) return false;
+                if (!msgId) {
+                    ERROR_PSC_PRINTF_P("handlePacket: zero packet identifier (type=0x%02x length=%zu)\n", static_cast<unsigned int>(type), length);
+                    closeConnection(MQTT_MALFORMED_PACKET);
+                    return false;
+                }
                 payloadOffset += 2;
                 if (publishQos == MQTT_QOS2) {
                     uint16_t* freeSlot = nullptr;
@@ -533,7 +555,11 @@ bool PubSubClient::handlePacket(uint8_t* buf, size_t bufSize, uint8_t hdrLen, si
                         if (!_rxQos2Ids[i]) freeSlot = &_rxQos2Ids[i];
                     }
                     if (!duplicate) {
-                        if (!freeSlot) return false;  // close before delivery; never evict an uncompleted handshake
+                        if (!freeSlot) {
+                            ERROR_PSC_PRINTF_P("handlePacket: QoS2 inflight exhausted (id=%u capacity=%u)\n", static_cast<unsigned int>(msgId), static_cast<unsigned int>(MQTT_RX_QOS2_MAX_INFLIGHT));
+                            closeConnection(MQTT_QOS2_INFLIGHT_EXHAUSTED);
+                            return false; // no delivery/eviction of an uncompleted exchange
+                        }
                         *freeSlot = msgId;
                     }
                 }
@@ -569,6 +595,7 @@ bool PubSubClient::handlePacket(uint8_t* buf, size_t bufSize, uint8_t hdrLen, si
             // MQTT Publish Acknowledgment (QoS 1 publish received): See section 3.4 MQTT v3.1.1 protocol specification
             if (length < 4) {
                 ERROR_PSC_PRINTF_P("handlePacket(): Received PUBACK packet with length %zu, expected at least 4 bytes\n", length);
+                closeConnection(MQTT_MALFORMED_PACKET);
                 return false;
             }
             // No futher action here, as resending is not supported.
@@ -578,6 +605,7 @@ bool PubSubClient::handlePacket(uint8_t* buf, size_t bufSize, uint8_t hdrLen, si
             // See section 3.5 MQTT v3.1.1 protocol specification.
             if (length < 4) {
                 ERROR_PSC_PRINTF_P("handlePacket(): Received PUBREC packet with length %zu, expected at least 4 bytes\n", length);
+                closeConnection(MQTT_MALFORMED_PACKET);
                 return false;
             }
             // MQTT Publish Release (QoS 2 publisher handshake, part 2): See section 3.6 MQTT v3.1.1 protocol specification
@@ -590,11 +618,16 @@ bool PubSubClient::handlePacket(uint8_t* buf, size_t bufSize, uint8_t hdrLen, si
             // See section 3.6 MQTT v3.1.1 protocol specification.
             if (length < 4) {
                 ERROR_PSC_PRINTF_P("handlePacket(): Received PUBREL packet with length %zu, expected at least 4 bytes\n", length);
+                closeConnection(MQTT_MALFORMED_PACKET);
                 return false;
             }
             {
                 const uint16_t msgId = (uint16_t)(((uint16_t)buf[2] << 8) | buf[3]);
-                if (!msgId) return false;
+                if (!msgId) {
+                    ERROR_PSC_PRINTF_P("handlePacket: zero packet identifier (type=0x%02x length=%zu)\n", static_cast<unsigned int>(type), length);
+                    closeConnection(MQTT_MALFORMED_PACKET);
+                    return false;
+                }
                 for (size_t i = 0; i < MQTT_RX_QOS2_MAX_INFLIGHT; ++i) {
                     if (_rxQos2Ids[i] == msgId) _rxQos2Ids[i] = 0;
                 }
@@ -609,6 +642,7 @@ bool PubSubClient::handlePacket(uint8_t* buf, size_t bufSize, uint8_t hdrLen, si
             // See section 3.7 MQTT v3.1.1 protocol specification.
             if (length < 4) {
                 ERROR_PSC_PRINTF_P("handlePacket(): Received PUBCOMP packet with length %zu, expected at least 4 bytes\n", length);
+                closeConnection(MQTT_MALFORMED_PACKET);
                 return false;
             }
             // No futher action here, as resending is not supported.
@@ -689,7 +723,8 @@ bool PubSubClient::loop() {
             _lastInActivity = t;
             ret = handlePacket(_buffer, _bufferSize, hdrLen, len);
             if (!ret && _state == MQTT_CONNECTED) {
-                closeConnection(MQTT_DISCONNECTED);
+                ERROR_PSC_PRINTF_P("loop: packet handler rejected malformed packet\n");
+                closeConnection(MQTT_MALFORMED_PACKET);
             }
         } else if (!connected()) {
             // readPacket has closed the connection
@@ -753,7 +788,7 @@ bool PubSubClient::processInbound() {
                             if (totalLen > MQTT_MAX_SANE_PACKET_SIZE) {
                                 ERROR_PSC_PRINTF_P("processInbound disconnecting on bogus streamed packet (%zu)\n", totalLen);
                                 _rxState = RX_IDLE;
-                                closeConnection(MQTT_DISCONNECTED);
+                                closeConnection(MQTT_PACKET_TOO_LARGE);
                                 return false;
                             }
                             _rxState = RX_PAYLOAD;
@@ -769,7 +804,7 @@ bool PubSubClient::processInbound() {
                                     // Fail-fast: close so the reconnect resynchronises the stream.
                                     ERROR_PSC_PRINTF_P("processInbound disconnecting on oversized packet (%zu > budget %zu)\n", totalLen, budgetSize);
                                     _rxState = RX_IDLE;
-                                    closeConnection(MQTT_DISCONNECTED);
+                                    closeConnection(MQTT_PACKET_TOO_LARGE);
                                     return false;
                                 }
                             } else {
@@ -779,9 +814,9 @@ bool PubSubClient::processInbound() {
                     }
                 } else if (_rxLen == MQTT_MAX_HEADER_SIZE) {
                     // Continuation bit still set after the maximum number of length bytes: invalid encoding
-                    ERROR_PSC_PRINTF_P("processInbound detected packet of invalid length\n");
+                    ERROR_PSC_PRINTF_P("processInbound: malformed remaining-length encoding\n");
                     _rxState = RX_IDLE;
-                    closeConnection(MQTT_DISCONNECTED);
+                    closeConnection(MQTT_MALFORMED_PACKET);
                     return false;
                 }
                 break;
@@ -853,7 +888,8 @@ bool PubSubClient::dispatchInbound() {
     const bool ok = handlePacket(_rxBuffer, _rxBufferSize, _rxHdrLen, _rxLen);
     _rxState = RX_IDLE;  // ready for the next packet (handlePacket may have overwritten _rxBuffer with an ACK)
     if (!ok && _state == MQTT_CONNECTED) {
-        closeConnection(MQTT_DISCONNECTED);
+        ERROR_PSC_PRINTF_P("dispatchInbound: packet handler rejected malformed packet\n");
+        closeConnection(MQTT_MALFORMED_PACKET);
     }
     return ok && connected();
 }

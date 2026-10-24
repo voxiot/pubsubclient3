@@ -91,6 +91,7 @@ static int callback_lifetime(bool incremental) {
     f.socket.queue({0x32, 6, 0, 1, 't', 0, 7, 'x'});
     IS_FALSE(f.mqtt.loop());
     IS_EQUAL(calls, 1u); IS_TRUE(callbackChecks);
+    IS_EQUAL(f.mqtt.state(), MQTT_DISCONNECTED);
     IS_EQUAL(f.socket.wire.size(), 2u); // only DISCONNECT, no ACK after it
     IS_TRUE(f.mqtt.setBufferSize(0));
 #if MQTT_ENABLE_INCREMENTAL_RX
@@ -149,6 +150,7 @@ static int malformed_qos_recovers(bool incremental) {
         if (zero) f.socket.queue({0x32, 5, 0, 1, 't', 0, 0});
         else f.socket.queue({0x32, 3, 0, 1, 't'});
         IS_FALSE(f.mqtt.loop()); IS_EQUAL(calls, 0u);
+        IS_EQUAL(f.mqtt.state(), MQTT_MALFORMED_PACKET);
         IS_TRUE(f.connect());
         f.socket.queue({0x30, 4, 0, 1, 't', 'x'});
         IS_TRUE(f.mqtt.loop()); IS_EQUAL(calls, 1u);
@@ -264,6 +266,8 @@ static int qos2_capacity(bool incremental) {
     IS_FALSE(f.mqtt.loop()); IS_EQUAL(calls, delivered + 1);
     IS_EQUAL(f.socket.wire.size(), wireBefore); // no PUBREC for the untracked message
     IS_FALSE(f.mqtt.connected());
+    IS_EQUAL(f.mqtt.state(), MQTT_QOS2_INFLIGHT_EXHAUSTED);
+    IS_EQUAL(f.socket.stopCalls, 1u);
     END_IT
 }
 
@@ -563,13 +567,78 @@ static int read_failure_reason() {
     END_IT
 }
 
+static int malformed_packet_reasons(bool incremental) {
+    IT("structural rejections report malformed packet, close once, and recover cleanly");
+    const std::vector<std::vector<uint8_t>> packets = {
+        {0x30, 0x80, 0x80, 0x80, 0x80}, // invalid remaining-length encoding
+        {0x30, 0},                      // missing topic length
+        {0x30, 2, 0, 0},                // empty topic
+        {0x30, 3, 0, 2, 't'},           // topic extends beyond packet
+        {0x36, 5, 0, 1, 't', 0, 7},     // invalid QoS 3
+        {0x40, 1, 0}, {0x50, 1, 0}, {0x62, 1, 0}, {0x70, 1, 0}, // short responses
+        {0x62, 2, 0, 0}                 // zero PUBREL identifier
+    };
+    for (const auto& packet : packets) {
+        Fixture f(incremental); IS_TRUE(f.connect());
+        f.socket.input.insert(f.socket.input.end(), packet.begin(), packet.end());
+        IS_FALSE(f.mqtt.loop()); IS_EQUAL(f.mqtt.state(), MQTT_MALFORMED_PACKET);
+        IS_EQUAL(calls, 0u); IS_TRUE(f.socket.wire.empty());
+        IS_EQUAL(f.socket.stopCalls, 1u);
+        IS_FALSE(f.mqtt.connected()); IS_EQUAL(f.mqtt.state(), MQTT_MALFORMED_PACKET);
+        IS_EQUAL(f.socket.stopCalls, 1u); // observing a closed socket cannot overwrite the reason
+        IS_TRUE(f.connect());
+        f.socket.queue({0x30, 4, 0, 1, 't', 'x'});
+        IS_TRUE(f.mqtt.loop()); IS_EQUAL(calls, 1u);
+    }
+    END_IT
+}
+
+static int oversized_packet_reasons(bool incremental) {
+    IT("fail-fast and beyond-sane packets report too large; normal disconnect remains clean");
+    for (int scenario = 0; scenario < 3; ++scenario) {
+        Fixture f(incremental); IS_TRUE(f.connect());
+        Stream stream;
+        if (scenario == 0) {
+            f.mqtt.setMaxIncomingPacket(6).setOversizedPolicy(MQTT_OVERSIZED_DISCONNECT);
+            f.socket.queue({0x30, 5, 0, 1, 't', 'x', 'y'});
+        } else {
+            f.mqtt.setOversizedPolicy(MQTT_OVERSIZED_IGNORE);
+            if (scenario == 2) f.mqtt.setStream(stream);
+            f.socket.queue({0x30, 0xff, 0xff, 0xff, 0x7f});
+        }
+        IS_FALSE(f.mqtt.loop()); IS_EQUAL(f.mqtt.state(), MQTT_PACKET_TOO_LARGE);
+        IS_EQUAL(calls, 0u); IS_EQUAL(f.socket.stopCalls, 1u);
+        IS_FALSE(f.mqtt.connected()); IS_EQUAL(f.mqtt.state(), MQTT_PACKET_TOO_LARGE);
+    }
+    Fixture f(incremental); IS_TRUE(f.connect()); f.mqtt.disconnect();
+    IS_EQUAL(f.mqtt.state(), MQTT_DISCONNECTED);
+    END_IT
+}
+
+static int connack_rejection_reasons() {
+    IT("malformed CONNACK differs from broker refusal and receive failure");
+    TestClock clock;
+    for (int scenario = 0; scenario < 4; ++scenario) {
+        Fixture f(false);
+        if (scenario == 0) f.socket.queue({0x20, 1, 0});
+        if (scenario == 1) f.socket.queue({0x40, 2, 0, 1});
+        if (scenario == 2) f.socket.queue({0x20, 2, 0, 5});
+        if (scenario == 3) f.socket.queue({0x20, 0xff, 0xff, 0xff, 0x7f});
+        IS_FALSE(f.mqtt.connect("test"));
+        const int expected = scenario == 2 ? MQTT_CONNECT_UNAUTHORIZED :
+                             (scenario == 3 ? MQTT_PACKET_TOO_LARGE : MQTT_MALFORMED_PACKET);
+        IS_EQUAL(f.mqtt.state(), expected); IS_EQUAL(f.socket.stopCalls, 1u);
+    }
+    END_IT
+}
+
 int main(int argc, char** argv) {
     SUITE("Session, memory and packet integrity regressions");
     if (argc > 1 && strcmp(argv[1], "--callback-only") == 0) {
         callback_lifetime(false);
         FINISH
     }
-    ownership(); blocking_timeout(); connect_wait_uses_socket_timeout(); read_failure_reason();
+    ownership(); blocking_timeout(); connect_wait_uses_socket_timeout(); read_failure_reason(); connack_rejection_reasons();
 #if MQTT_ENABLE_INCREMENTAL_RX
     reconnect_resets_rx();
 #endif
@@ -582,6 +651,7 @@ int main(int argc, char** argv) {
         control_response_writes(mode != 0); keepalive_write_policy(mode != 0);
         socket_timeout_defaults(mode != 0);
         self_presence_delivery(mode != 0);
+        malformed_packet_reasons(mode != 0); oversized_packet_reasons(mode != 0);
     }
     FINISH
 }

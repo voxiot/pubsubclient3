@@ -113,6 +113,9 @@ static_assert(MQTT_SOCKET_TIMEOUT >= 1 && MQTT_SOCKET_TIMEOUT <= 65535,
  * @brief These values indicate the current PubSubClient::state() of the client.
  * @{
  */
+#define MQTT_QOS2_INFLIGHT_EXHAUSTED -13 ///< No free slot for a new inbound QoS 2 exchange.
+#define MQTT_PACKET_TOO_LARGE        -12 ///< Incoming packet exceeds the configured receive/safety limit.
+#define MQTT_MALFORMED_PACKET        -11 ///< Incoming packet fails an existing structural validation.
 #define MQTT_PACKET_TIMEOUT          -10 ///< An incoming packet did not complete within its receive deadline.
 #define MQTT_KEEPALIVE_TIMEOUT        -9  ///< An outstanding PINGREQ was not answered before the keepalive deadline.
 #define MQTT_PUBLISH_INCOMPLETE       -8  ///< A manual PUBLISH was abandoned before endPublish completed.
