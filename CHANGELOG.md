@@ -7,6 +7,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/).
 
+## [6.0.1] - 2026-10-24
+
+### Fixed
+
+- Report specific rejection states for malformed packets, including CONNACK (`MQTT_MALFORMED_PACKET`, -11), oversized packets (`MQTT_PACKET_TOO_LARGE`, -12), and exhausted inbound QoS 2 capacity (`MQTT_QOS2_INFLIGHT_EXHAUSTED`, -13), replacing generic disconnect reasons for these failures.
+- Preserve previously determined transport, write, timeout and broker refusal reasons during CONNECT and receive dispatch. Keep clean callback disconnects and the drain-and-ignore policy unchanged.
+- Add rejection diagnostics with structural details, packet/budget sizes and QoS 2 identifier/capacity, without adding per-client fields, buffers or allocations.
+
+### Tests
+
+- Extend host regressions for malformed packets/CONNACK, oversized packets and QoS 2 capacity exhaustion, checking preserved states, a single transport close, suppressed invalid delivery/ACKs and recovery after reconnect where applicable.
+
 ## [6.0.0] - 2026-10-24
 
 ### Changed

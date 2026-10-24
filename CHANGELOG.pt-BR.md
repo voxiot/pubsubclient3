@@ -6,6 +6,18 @@ Todas as alterações relevantes deste projeto serão documentadas neste arquivo
 
 O formato é baseado em [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), e este projeto segue o [Versionamento Semântico](https://semver.org/).
 
+## [6.0.1] - 2026-10-24
+
+### Corrigido
+
+- Reportar estados específicos de rejeição para pacotes malformados, incluindo CONNACK (`MQTT_MALFORMED_PACKET`, -11), pacotes grandes demais (`MQTT_PACKET_TOO_LARGE`, -12) e esgotamento da capacidade de QoS 2 recebido (`MQTT_QOS2_INFLIGHT_EXHAUSTED`, -13), substituindo motivos genéricos de desconexão nessas falhas.
+- Preservar os motivos de transporte, escrita, timeout e recusa do broker já determinados durante CONNECT e processamento da recepção. Manter o comportamento da desconexão normal solicitada no callback e da política de drenar e ignorar.
+- Adicionar diagnósticos de rejeição com detalhes estruturais, tamanho/limite do pacote e identificador/capacidade de QoS 2, sem adicionar campos por cliente, buffers ou alocações.
+
+### Testes
+
+- Ampliar as regressões host para pacotes/CONNACK malformados, pacotes grandes demais e esgotamento da capacidade de QoS 2, verificando preservação dos estados, um único fechamento do transporte, ausência de entrega/ACKs inválidos e recuperação após reconexão quando aplicável.
+
 ## [6.0.0] - 2026-10-24
 
 ### Alterado
