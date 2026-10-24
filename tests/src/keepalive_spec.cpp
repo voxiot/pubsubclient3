@@ -171,7 +171,7 @@ int test_keepalive_disconnects_hung() {
     IS_FALSE(rc);
 
     int state = client.state();
-    IS_TRUE(state == MQTT_CONNECTION_TIMEOUT);
+    IS_TRUE(state == MQTT_KEEPALIVE_TIMEOUT);
 
     IS_FALSE(shimClient.error());
 

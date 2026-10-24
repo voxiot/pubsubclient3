@@ -17,6 +17,7 @@ class WireClient : public ShimClient {
     size_t stopCalls = 0;
     unsigned long timeAtWrite = 0;
     unsigned long yieldsAtWrite = 0;
+    bool failRead = false;
     using ShimClient::write;
     using ShimClient::read;
     size_t write(const uint8_t* bytes, size_t size) override {
@@ -29,6 +30,7 @@ class WireClient : public ShimClient {
     }
     int available() override { return !input.empty(); }
     int read() override {
+        if (failRead) return -1;
         if (input.empty()) return -1;
         const int b = input.front(); input.pop_front(); return b;
     }
@@ -42,8 +44,12 @@ static bool callbackChecks;
 static bool disconnectInCallback;
 static bool publishInCallback;
 static bool incompleteInCallback;
-static void received(char*, uint8_t*, size_t) {
+static bool receivedRetained;
+static std::string receivedPayload;
+static void received(char*, uint8_t* payload, size_t length) {
     ++calls;
+    receivedRetained = current->getRxRetained();
+    receivedPayload.assign(reinterpret_cast<const char*>(payload), length);
     if (disconnectInCallback) {
         current->disconnect();
         callbackChecks = current->getRxQos() == MQTT_QOS1 &&
@@ -107,7 +113,7 @@ static int blocking_timeout() {
         if (tail) f.socket.queue({0x30, 5, 0, 1, 't'});
         else f.socket.queue({0x30, 0x80});
         IS_FALSE(f.mqtt.loop()); IS_FALSE(f.mqtt.connected());
-        IS_EQUAL(f.mqtt.state(), MQTT_CONNECTION_TIMEOUT);
+        IS_EQUAL(f.mqtt.state(), MQTT_PACKET_TIMEOUT);
         IS_EQUAL(calls, 0u);
         IS_TRUE(f.connect());
         f.socket.queue({0x30, 4, 0, 1, 't', 'x'});
@@ -190,9 +196,11 @@ static int publish_lengths() {
     IS_TRUE(f.mqtt.beginPublish("t", 2, false));
     IS_EQUAL(f.mqtt.write((uint8_t)'x'), 1u);
     IS_FALSE(f.mqtt.endPublish()); IS_FALSE(f.mqtt.connected());
+    IS_EQUAL(f.mqtt.state(), MQTT_PUBLISH_INCOMPLETE);
     IS_TRUE(f.connect()); IS_TRUE(f.mqtt.beginPublish("t", 2, false));
     const size_t header = f.socket.wire.size();
     f.mqtt.disconnect(); IS_EQUAL(f.socket.wire.size(), header);
+    IS_EQUAL(f.mqtt.state(), MQTT_PUBLISH_INCOMPLETE);
     END_IT
 }
 
@@ -304,7 +312,7 @@ static int unfinished_callback_publish(bool incremental) {
     Fixture f(incremental); IS_TRUE(f.connect()); incompleteInCallback = true;
     f.socket.queue({0x32, 6, 0, 1, 't', 0, 7, 'x'});
     IS_FALSE(f.mqtt.loop()); IS_TRUE(callbackChecks);
-    IS_FALSE(f.mqtt.connected()); IS_EQUAL(f.mqtt.state(), MQTT_CONNECTION_LOST);
+    IS_FALSE(f.mqtt.connected()); IS_EQUAL(f.mqtt.state(), MQTT_PUBLISH_INCOMPLETE);
     IS_EQUAL(f.socket.wire.size(), 9u); // only header + topic 'reply'
     END_IT
 }
@@ -375,7 +383,7 @@ static int control_response_writes(bool incremental) {
                 IS_EQUAL(f.socket.writeCalls - writesBefore, (outcome == 0 ? 1u : length));
             } else {
                 IS_FALSE(f.mqtt.loop()); IS_FALSE(f.mqtt.connected());
-                IS_EQUAL(f.mqtt.state(), MQTT_CONNECTION_LOST);
+                IS_EQUAL(f.mqtt.state(), MQTT_CONTROL_RESPONSE_FAILED);
                 IS_EQUAL(f.socket.wire.size(), (outcome == 3 ? 0u : 1u));
                 IS_EQUAL(f.socket.stopCalls, 1u); // helper and caller must not both close
                 if (incremental) {
@@ -432,7 +440,7 @@ static int keepalive_write_policy(bool incremental) {
         } else {
             f.socket.queue({0x30, 4, 0, 1, 't', 'x'});
             IS_FALSE(f.mqtt.loop()); IS_FALSE(f.mqtt.connected());
-            IS_EQUAL(f.mqtt.state(), MQTT_CONNECTION_LOST);
+            IS_EQUAL(f.mqtt.state(), MQTT_WRITE_INCOMPLETE);
             IS_EQUAL(calls, 0u); // do not dispatch RX after failing to send the ping
             IS_EQUAL(f.socket.wire.size(), 1u);
             IS_EQUAL(f.socket.stopCalls, 1u);
@@ -477,7 +485,7 @@ static int socket_timeout_defaults(bool incremental) {
             setTestMillis(100 + timeout, 0);
         }
         IS_FALSE(mqtt.loop());
-        IS_EQUAL(mqtt.state(), MQTT_CONNECTION_TIMEOUT);
+        IS_EQUAL(mqtt.state(), MQTT_PACKET_TIMEOUT);
         if (!incremental) {
             IS_TRUE(peekTestMillis() >= 100 + timeout);
             IS_TRUE(peekTestMillis() < 100 + timeout + 20);
@@ -506,13 +514,62 @@ static int connect_wait_uses_socket_timeout() {
     END_IT
 }
 
+static int self_presence_delivery(bool incremental) {
+    IT("offline self-presence is delivered with its RETAIN flag; failed PUBACK closes after callback");
+    TestClock clock;
+    for (int retained = 0; retained < 2; ++retained) {
+        for (int failure = 0; failure < 3; ++failure) {
+            Fixture f(incremental); IS_TRUE(f.connect());
+            IS_TRUE(f.mqtt.subscribe("lwt", 1)); f.socket.wire.clear();
+            if (failure) f.socket.setWriteLimit(failure == 1 ? 0 : 1);
+            // Same payload in subscription replay (0x33) and live delivery (0x32).
+            f.socket.queue({(uint8_t)(0x32 | retained), 14, 0, 3, 'l', 'w', 't',
+                            0, 7, 'o', 'f', 'f', 'l', 'i', 'n', 'e'});
+            const bool alive = f.mqtt.loop();
+            IS_EQUAL(calls, 1u);
+            IS_EQUAL(receivedRetained, (retained != 0));
+            IS_TRUE(receivedPayload == "offline");
+            IS_FALSE(f.mqtt.getRxRetained()); // metadata is callback-scoped
+            if (!failure) {
+                IS_TRUE(alive); IS_TRUE(f.mqtt.connected());
+                IS_TRUE((f.socket.wire == std::vector<uint8_t>{0x40, 2, 0, 7}));
+            } else {
+                IS_FALSE(alive); IS_FALSE(f.mqtt.connected());
+                IS_EQUAL(f.mqtt.state(), MQTT_CONTROL_RESPONSE_FAILED);
+                IS_EQUAL(f.socket.stopCalls, 1u);
+                IS_EQUAL(f.socket.wire.size(), (failure == 1 ? 0u : 1u));
+                // A fresh transport cannot replay unread bytes from the old connection.
+                f.socket.setWriteLimit(1024); IS_TRUE(f.connect());
+                IS_TRUE(f.mqtt.loop()); IS_EQUAL(calls, 1u);
+                f.socket.queue({0x30, 11, 0, 3, 'l', 'w', 't', 'o', 'n', 'l', 'i', 'n', 'e'});
+                IS_TRUE(f.mqtt.loop()); IS_EQUAL(calls, 2u);
+                IS_TRUE(receivedPayload == "online");
+            }
+        }
+    }
+    END_IT
+}
+
+static int read_failure_reason() {
+    IT("blocking available/read mismatch has its own reason and transport loss remains -3");
+    TestClock clock;
+    Fixture f(false); IS_TRUE(f.connect());
+    f.socket.queue({0x30}); f.socket.failRead = true;
+    IS_FALSE(f.mqtt.loop()); IS_EQUAL(f.mqtt.state(), MQTT_READ_FAILED);
+    IS_EQUAL(f.socket.stopCalls, 1u);
+    f.socket.failRead = false; IS_TRUE(f.connect());
+    f.socket.setConnected(false);
+    IS_FALSE(f.mqtt.connected()); IS_EQUAL(f.mqtt.state(), MQTT_CONNECTION_LOST);
+    END_IT
+}
+
 int main(int argc, char** argv) {
     SUITE("Session, memory and packet integrity regressions");
     if (argc > 1 && strcmp(argv[1], "--callback-only") == 0) {
         callback_lifetime(false);
         FINISH
     }
-    ownership(); blocking_timeout(); connect_wait_uses_socket_timeout();
+    ownership(); blocking_timeout(); connect_wait_uses_socket_timeout(); read_failure_reason();
 #if MQTT_ENABLE_INCREMENTAL_RX
     reconnect_resets_rx();
 #endif
@@ -524,6 +581,7 @@ int main(int argc, char** argv) {
         unfinished_callback_publish(mode != 0);
         control_response_writes(mode != 0); keepalive_write_policy(mode != 0);
         socket_timeout_defaults(mode != 0);
+        self_presence_delivery(mode != 0);
     }
     FINISH
 }

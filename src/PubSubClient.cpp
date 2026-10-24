@@ -256,8 +256,10 @@ bool PubSubClient::connect(const char* id, const char* user, const char* pass, c
                 }
             }
 
+            // A new attempt must not inherit WRITE_INCOMPLETE from the previous socket.
+            _state = MQTT_DISCONNECTED;
             if (!writeControlPacket(MQTTCONNECT, length - MQTT_MAX_HEADER_SIZE)) {
-                closeConnection(MQTT_CONNECT_FAILED);
+                if (_state != MQTT_WRITE_INCOMPLETE) closeConnection(MQTT_CONNECT_FAILED);
                 return false;
             }
             _lastInActivity = _lastOutActivity = millis();
@@ -327,7 +329,7 @@ void PubSubClient::disconnect() {
         _client->flush();
         _lastInActivity = _lastOutActivity = millis();
     }
-    closeConnection(MQTT_DISCONNECTED);
+    closeConnection(_txActive ? MQTT_PUBLISH_INCOMPLETE : MQTT_DISCONNECTED);
 }
 
 /**
@@ -344,7 +346,7 @@ bool PubSubClient::readByte(uint8_t* result) {
         PUBSUB_WAIT_YIELD();
         unsigned long currentMillis = millis();
         if (currentMillis - previousMillis >= _socketTimeoutMillis) {
-            closeConnection(MQTT_CONNECTION_TIMEOUT);
+            closeConnection(MQTT_PACKET_TIMEOUT);
             return false;  // parser state cannot be resumed after returning
         }
         // Overall packet deadline: a peer dripping one byte just below the per-byte timeout (slowloris)
@@ -352,13 +354,13 @@ bool PubSubClient::readByte(uint8_t* result) {
         // Independent of the per-byte socket timeout; 0 falls back to it (see setPacketTimeout()).
         const unsigned long packetTimeout = _packetTimeoutMillis ? _packetTimeoutMillis : _socketTimeoutMillis;
         if (currentMillis - _packetReadStart >= packetTimeout) {
-            closeConnection(MQTT_CONNECTION_TIMEOUT);
+            closeConnection(MQTT_PACKET_TIMEOUT);
             return false;
         }
     }
     int rc = _client->read();
     if (rc < 0) {
-        closeConnection(MQTT_CONNECTION_LOST);
+        closeConnection(MQTT_READ_FAILED);
         return false;
     }
     *result = (uint8_t)rc;
@@ -553,7 +555,7 @@ bool PubSubClient::handlePacket(uint8_t* buf, size_t bufSize, uint8_t hdrLen, si
             if (_txActive) {
                 // A callback must finish its manual publish before returning; an ACK cannot
                 // be inserted into the still-open payload.
-                closeConnection(MQTT_CONNECTION_LOST);
+                closeConnection(MQTT_PUBLISH_INCOMPLETE);
                 return false;
             }
             if (publishQos > MQTT_QOS0) {
@@ -643,7 +645,7 @@ bool PubSubClient::loop() {
     if (_keepAliveMillis && ((t - _lastInActivity > _keepAliveMillis) || (t - _lastOutActivity > _keepAliveMillis))) {
         if (_pingOutstanding) {
             DEBUG_PSC_PRINTF("loop aborting due to timeout\n");
-            closeConnection(MQTT_CONNECTION_TIMEOUT);
+            closeConnection(MQTT_KEEPALIVE_TIMEOUT);
             return false;
         } else {
             _buffer[0] = MQTTPINGREQ;
@@ -835,7 +837,7 @@ bool PubSubClient::processInbound() {
         if (millis() - _packetReadStart >= packetTimeout) {
             ERROR_PSC_PRINTF_P("processInbound aborting stalled packet\n");
             _rxState = RX_IDLE;
-            closeConnection(MQTT_CONNECTION_TIMEOUT);
+            closeConnection(MQTT_PACKET_TIMEOUT);
             return false;
         }
     }
@@ -927,7 +929,7 @@ bool PubSubClient::beginPublishImpl(bool progmem, const char* topic, size_t plen
 bool PubSubClient::endPublish() {
     if (!_txActive || !connected()) return false;
     if (_txRemaining) {
-        closeConnection(MQTT_CONNECTION_LOST);
+        closeConnection(MQTT_PUBLISH_INCOMPLETE);
         return false;
     }
     if (_bufferWritePos && flushBuffer() == 0) return false;
@@ -1013,15 +1015,16 @@ size_t PubSubClient::write_P(const uint8_t* buf, size_t size) {
  * @param  packetStarted True if an earlier part of this MQTT packet was already sent (e.g. the PUBLISH header).
  * @param  allowRetry False makes at most one transport write (for a nonempty buffer), with no retry-loop
  * yield or deadline-clock sampling. Closure precedence on an incomplete attempt:
- * - Any byte sent, or packetStarted=true: close internally with MQTT_CONNECTION_LOST, then return false.
+ * - Any byte sent, or packetStarted=true: close internally with failureState, then return false.
  * - Zero bytes and packetStarted=false: return false without closing; the caller chooses its policy.
  * Callers must not close again after an internal close or overwrite its state. A successful send still
  * samples millis() once to update _lastOutActivity. The transport/stop calls themselves may block.
+ * @param failureState Reason retained on an incomplete send; mandatory replies use #MQTT_CONTROL_RESPONSE_FAILED.
  * @return true if all size bytes were written (_lastOutActivity updated). false if they were not: if no part
  * of the packet was sent the connection is left alone, otherwise the connection is
- * closed and _state is set to #MQTT_CONNECTION_LOST.
+ * closed and _state is set to failureState (default #MQTT_WRITE_INCOMPLETE).
  */
-bool PubSubClient::writeToClient(const uint8_t* buf, size_t size, bool packetStarted, bool allowRetry) {
+bool PubSubClient::writeToClient(const uint8_t* buf, size_t size, bool packetStarted, bool allowRetry, int failureState) {
     if (!_client) return false;
 
     size_t written = 0;
@@ -1045,8 +1048,8 @@ bool PubSubClient::writeToClient(const uint8_t* buf, size_t size, bool packetSta
         return true;
     }
 
-    ERROR_PSC_PRINTF_P("writeToClient(): wrote %zu of %zu bytes (packetStarted=%u), closing connection to resynchronise\n", written, size, (unsigned int)packetStarted);
-    closeConnection(MQTT_CONNECTION_LOST);
+    ERROR_PSC_PRINTF_P("writeToClient(): sent=%zu expected=%zu packetStarted=%u reason=%d; closing\n", written, size, (unsigned int)packetStarted, failureState);
+    closeConnection(failureState);
     return false;
 }
 
@@ -1058,9 +1061,13 @@ bool PubSubClient::writeControlResponse(const uint8_t* buf, size_t size) {
 #else
     const bool allowRetry = true;
 #endif
-    if (writeToClient(buf, size, false, allowRetry)) return true;
+    // Capture before closing/resetting the transport; no access to the RX packet after callback.
+    const unsigned int responseType = size ? static_cast<unsigned int>(buf[0]) : 0u;
+    (void)responseType; // logging may be compiled out
+    if (writeToClient(buf, size, false, allowRetry, MQTT_CONTROL_RESPONSE_FAILED)) return true;
+    ERROR_PSC_PRINTF_P("required response 0x%02x failed (expected=%zu reason=%d)\n", responseType, size, MQTT_CONTROL_RESPONSE_FAILED);
     // Partial writes have already closed internally; only close a still-open failed response.
-    if (_state == MQTT_CONNECTED) closeConnection(MQTT_CONNECTION_LOST);
+    if (_state == MQTT_CONNECTED) closeConnection(MQTT_CONTROL_RESPONSE_FAILED);
     return false;
 }
 

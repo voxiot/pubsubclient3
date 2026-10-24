@@ -8,6 +8,21 @@ O formato é baseado em [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 
 ## Ainda não lançado
 
+## [6.0.0] - 2026-10-24
+
+### Alterado
+
+- **Incompatível:** reportar estados específicos para falha de leitura (-5), escrita incompleta (-6), falha de resposta obrigatória (-7), publicação manual abandonada (-8), timeout de keepalive (-9) e timeout de recepção de pacote (-10). As constantes numéricas existentes permanecem reservadas; -3 passa a representar perda de transporte sem causa específica e -4 a espera do primeiro byte do CONNACK. Consumidores que classificavam todas as falhas usando -3/-4 precisam tratar os novos estados.
+- Informar tipo da resposta e bytes enviados/esperados nos diagnósticos de erro, sem adicionar campos por cliente ou buffers.
+
+### Corrigido
+
+- Preservar o motivo específico da escrita incompleta de CONNECT e impedir que uma tentativa seguinte com zero bytes enviados herde esse estado.
+
+### Testes
+
+- Cobrir presença própria retida/ao vivo, falhas no PUBACK, motivos explícitos de desconexão, limpeza na reconexão e envio em blocos nos testes host.
+
 ## [5.0.0] - 2026-10-21
 
 ### Alterado

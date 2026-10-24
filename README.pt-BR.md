@@ -24,7 +24,7 @@ A versão **5.0.0** é uma versão major porque as correções de integridade de
 
 - **A recepção incremental exige uma flag de compilação.** O build padrão exclui estado, parser e APIs incrementais. Consumidores incrementais devem definir `MQTT_ENABLE_INCREMENTAL_RX=1` consistentemente na biblioteca e na aplicação, recompilar e manter a chamada a `setRxBufferSize()` em execução. Veja o perfil de recepção abaixo.
 - **A cópia de clientes foi proibida.** O construtor de cópia e a atribuição por cópia foram excluídos porque duplicavam ponteiros proprietários e poderiam causar liberação duplicada de memória. Passe `PubSubClient` por referência ou ponteiro; crie e configure outra instância quando precisar de um cliente independente.
-- **A publicação manual é uma transação explícita de pacote.** Todo `beginPublish()` bem-sucedido deve ser seguido de exatamente a quantidade anunciada de bytes de payload e de `endPublish()`, inclusive para um payload vazio. `write()` fora de uma transação retorna zero; uma escrita maior que o payload restante é rejeitada integralmente. Finalizar com bytes faltando encerra a conexão com `MQTT_CONNECTION_LOST`.
+- **A publicação manual é uma transação explícita de pacote.** Todo `beginPublish()` bem-sucedido deve ser seguido de exatamente a quantidade anunciada de bytes de payload e de `endPublish()`, inclusive para um payload vazio. `write()` fora de uma transação retorna zero; uma escrita maior que o payload restante é rejeitada integralmente. Finalizar com bytes faltando encerra a conexão com `MQTT_PUBLISH_INCOMPLETE`.
 
 Durante uma publicação manual, `loop()` verifica a conexão, mas adia a recepção e o keepalive; publicações aninhadas, subscribe/unsubscribe, reconexão e alterações de buffer são recusados. Conclua a transação prontamente e finalize uma publicação manual iniciada dentro de um callback antes de retornar. Alterações de buffer e reconexão também são recusadas durante toda a execução do callback. Essas restrições impedem que outros pacotes MQTT se tornem bytes de um payload incompleto e evitam acessos a buffers invalidados.
 
@@ -91,8 +91,8 @@ Um PUBLISH pode exigir várias escritas de rede: `beginPublish()` envia o cabeç
 | Resultado da escrita | Antes da v4.0.2 | v4.0.2 |
 | --- | --- | --- |
 | Nenhum byte do pacote inteiro é enviado; o transporte permanece conectado | Retorna falha e mantém a conexão | Sem alteração: retorna falha e mantém a conexão |
-| O cabeçalho é enviado; a escrita do payload envia zero bytes e não consegue concluir | Retorna falha, mas deixa um pacote incompleto em uma conexão aberta | Retorna falha e encerra a conexão com `MQTT_CONNECTION_LOST` |
-| Um bloco completo é enviado; o próximo bloco envia zero bytes e não consegue concluir | Poderia manter a conexão apesar do pacote incompleto | Encerra a conexão com `MQTT_CONNECTION_LOST` |
+| O cabeçalho é enviado; a escrita do payload envia zero bytes e não consegue concluir | Retorna falha, mas deixa um pacote incompleto em uma conexão aberta | Retorna falha e encerra a conexão com `MQTT_WRITE_INCOMPLETE` |
+| Um bloco completo é enviado; o próximo bloco envia zero bytes e não consegue concluir | Poderia manter a conexão apesar do pacote incompleto | Encerra a conexão com `MQTT_WRITE_INCOMPLETE` |
 | Uma escrita envia alguns bytes e depois não consegue concluir | Encerra a conexão | Sem alteração: encerra a conexão |
 | Escritas parciais conseguem concluir dentro do timeout existente | Conclui a escrita e mantém a conexão | Sem alteração |
 
@@ -114,7 +114,7 @@ Estas correções se aplicam à recepção bloqueante e à incremental. Não alt
 | --- | --- | --- |
 | O callback desconecta e libera/redimensiona buffers | Um ACK posterior poderia acessar memória liberada | Alterações de buffer e reconexão são recusadas durante o callback; o ACK usa bytes locais e não é enviado após a desconexão |
 | Cópia de um cliente | Copiava ponteiros proprietários compartilhados; liberação duplicada na destruição | Construtor de cópia e atribuição são excluídos; passe clientes por referência/ponteiro |
-| A recepção bloqueante para no meio do pacote | Retornava com socket aberto e dessincronizado | Encerra com `MQTT_CONNECTION_TIMEOUT`; a próxima conexão começa no limite de um pacote |
+| A recepção bloqueante para no meio do pacote | Retornava com socket aberto e dessincronizado | Encerra com `MQTT_PACKET_TIMEOUT`; a próxima conexão começa no limite de um pacote |
 | Reconexão após recepção fragmentada | O estado antigo de cabeçalho/payload/descarte poderia consumir dados da nova sessão | Todo o estado do parser é reiniciado ao fechar e antes de conectar |
 | Pacote QoS 1/2 malformado sem identificador | O indicador de callback ocupado poderia permanecer ativo indefinidamente | Valida o identificador completo e diferente de zero antes de entrar no callback; a proteção é desativada ao sair |
 | PUBLISH manual sobreposto a `loop()` ou a outra operação | ACK, ping ou outro cabeçalho poderiam virar bytes do payload | Controla o pacote ativo e o payload restante; adia RX/keepalive até `endPublish()` |
@@ -123,7 +123,7 @@ Estas correções se aplicam à recepção bloqueante e à incremental. Não alt
 | PUBLISH QoS 2 recebido em duplicidade | O callback poderia executar novamente antes de PUBREL | Controla identificadores pendentes, repete PUBREC sem repetir o callback e libera o identificador em PUBREL |
 | Tópicos vazios ou maiores que 65535 bytes | Poderia enviar SUBSCRIBE/UNSUBSCRIBE/PUBLISH malformado | Rejeita sem enviar; strings de CONNECT e escritas internas de strings também têm limites verificados |
 
-`beginPublish()` / `write()` / `endPublish()` constitui uma única transação síncrona de pacote. Conclua-a prontamente: enquanto estiver ativa, `loop()` apenas verifica a conexão e adia o processamento do protocolo. Publicações aninhadas, subscribe/unsubscribe, reconexão e alterações de buffer são recusados. `write()` fora dessa transação retorna zero. Uma escrita maior que o payload restante é rejeitada integralmente, retornando zero; escritas menores ainda podem completá-lo. `endPublish()` com bytes faltando retorna false e encerra com `MQTT_CONNECTION_LOST`. `disconnect()` durante uma transação incompleta fecha o socket diretamente, sem inserir um DISCONNECT no payload. Mesmo um payload de tamanho zero exige `endPublish()`.
+`beginPublish()` / `write()` / `endPublish()` constitui uma única transação síncrona de pacote. Conclua-a prontamente: enquanto estiver ativa, `loop()` apenas verifica a conexão e adia o processamento do protocolo. Publicações aninhadas, subscribe/unsubscribe, reconexão e alterações de buffer são recusados. `write()` fora dessa transação retorna zero. Uma escrita maior que o payload restante é rejeitada integralmente, retornando zero; escritas menores ainda podem completá-lo. `endPublish()` com bytes faltando retorna false e encerra com `MQTT_PUBLISH_INCOMPLETE`. `disconnect()` durante uma transação incompleta fecha o socket diretamente, sem inserir um DISCONNECT no payload. Mesmo um payload de tamanho zero exige `endPublish()`.
 
 Um callback pode publicar de forma síncrona ou desconectar. Deve concluir qualquer publicação manual antes de retornar; caso contrário, a conexão é encerrada para evitar a inserção de um ACK no payload. `setBufferSize()` e `setRxBufferSize()` retornam false enquanto um callback ou uma publicação manual estiver ativo, inclusive depois que o callback chamar `disconnect()`. Alterações de endpoint/transporte/stream são ignoradas durante essas operações. Os ponteiros de tópico/payload continuam sendo temporários: uma publicação dentro do callback pode sobrescrever os dados; copie antes o que precisar preservar. O cliente continua sendo de uso por uma única thread; essas proteções não fornecem sincronização entre threads.
 
@@ -137,7 +137,7 @@ Cobertura de regressão: `tests/src/resilience_spec.cpp`, executado por `make te
 
 ### Respostas de controle e verificações de configuração
 
-PUBACK, PUBREC, PUBREL, PUBCOMP e PINGRESP compartilham um helper de resposta obrigatória. Na recepção bloqueante clássica, escritas parciais recuperáveis são completadas dentro do timeout de tentativas do socket. Com a recepção incremental habilitada por `setRxBufferSize()`, cada resposta automática faz exatamente uma tentativa de escrita no transporte: uma escrita parcial encerra imediatamente com `MQTT_CONNECTION_LOST`, sem novas tentativas nem cessão de CPU em um laço de retry. Nos dois modos, zero bytes na primeira tentativa encerra a conexão, pois essas respostas obrigatórias não são enfileiradas para depois.
+PUBACK, PUBREC, PUBREL, PUBCOMP e PINGRESP compartilham um helper de resposta obrigatória. Na recepção bloqueante clássica, escritas parciais recuperáveis são completadas dentro do timeout de tentativas do socket. Com a recepção incremental habilitada por `setRxBufferSize()`, cada resposta automática faz exatamente uma tentativa de escrita no transporte: uma escrita parcial encerra imediatamente com `MQTT_CONTROL_RESPONSE_FAILED`, sem novas tentativas nem cessão de CPU em um laço de retry. Nos dois modos, zero bytes na primeira tentativa encerra a conexão, pois essas respostas obrigatórias não são enfileiradas para depois.
 
 No QoS 1 recebido, o callback pode executar antes de falhar a transmissão de PUBACK, inclusive com zero bytes enviados. O broker pode reenviar o PUBLISH não confirmado após a reconexão, especialmente ao retomar uma sessão persistente. Não há supressão de duplicatas de entrada para QoS 1 nesta biblioteca: a reentrega ao callback é esperada na semântica de entrega pelo menos uma vez; quando necessário, torne os efeitos da operação na aplicação idempotentes.
 
@@ -207,3 +207,27 @@ Veja [CHANGELOG.md](CHANGELOG.md).
 ## Licença
 
 Este código é distribuído sob a [licença MIT](LICENSE.txt).
+
+### Motivos explícitos de desconexão
+
+Os números existentes continuam reservados. Falhas locais conhecidas usam códigos específicos:
+
+| Código | Estado | Significado |
+| --- | --- | --- |
+| -3 | `MQTT_CONNECTION_LOST` | Transporte encerrado sem causa local mais específica |
+| -4 | `MQTT_CONNECTION_TIMEOUT` | Timeout aguardando o primeiro byte do CONNACK |
+| -5 | `MQTT_READ_FAILED` | Leitura bloqueante falhou apesar de haver bytes disponíveis |
+| -6 | `MQTT_WRITE_INCOMPLETE` | Não foi possível completar um pacote cujo envio já começou |
+| -7 | `MQTT_CONTROL_RESPONSE_FAILED` | Falha ao enviar PUBACK/PUBREC/PUBREL/PUBCOMP/PINGRESP obrigatório |
+| -8 | `MQTT_PUBLISH_INCOMPLETE` | PUBLISH manual abandonado no endPublish, disconnect ou retorno do callback |
+| -9 | `MQTT_KEEPALIVE_TIMEOUT` | Ping pendente excedeu o prazo de resposta |
+| -10 | `MQTT_PACKET_TIMEOUT` | Prazo de recepção do pacote expirou |
+
+Atualize consumidores que tratavam -3/-4 como categorias exaustivas de falha.
+A recepção incremental continua adiando uma leitura que retorna -1 apesar de
+available(), sem encerrar imediatamente. O log de falha de resposta obrigatória
+informa o tipo no protocolo (PUBACK=0x40); o de escrita incompleta informa os
+bytes enviados/esperados. Esses detalhes dependem da configuração de log de erros
+existente. Não foram adicionados campos por instância, buffers, alocações ou
+reconexões automáticas. Só o fechamento do transporte não identifica Client ID
+duplicado nem comprova queda da Internet.

@@ -359,7 +359,14 @@ int test_connect_fails_on_partial_write() {
     IS_FALSE(rc);
 
     int state = client.state();
-    IS_TRUE(state == MQTT_CONNECT_FAILED);
+    IS_TRUE(state == MQTT_WRITE_INCOMPLETE);
+    IS_FALSE(shimClient.connected());
+
+    // The next attempt sending zero bytes must not retain the old partial-write reason
+    // or leave its newly opened transport alive.
+    shimClient.setWriteLimit(0);
+    IS_FALSE(client.connect("client_test1"));
+    IS_EQUAL(client.state(), MQTT_CONNECT_FAILED);
     IS_FALSE(shimClient.connected());
 
     END_IT

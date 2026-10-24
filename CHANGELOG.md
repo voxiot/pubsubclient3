@@ -9,6 +9,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## Unreleased
 
+## [6.0.0] - 2026-10-24
+
+### Changed
+
+- **Breaking:** report dedicated disconnect states for read failures (-5), incomplete writes (-6), failed mandatory responses (-7), abandoned manual publications (-8), keepalive timeouts (-9), and packet receive timeouts (-10). Preserve existing numeric constants; -3 now describes unclassified transport loss and -4 describes the wait for the first CONNACK byte. Consumers that classified all failures using -3/-4 must handle the new states.
+- Include response packet type and sent/expected byte counts in backend error diagnostics, without adding per-client fields or buffers.
+
+### Fixed
+
+- Preserve the specific failure state when a CONNECT write is incomplete, and prevent a subsequent zero-byte CONNECT attempt from inheriting that state.
+
+### Tests
+
+- Cover retained/live self-presence delivery, failed PUBACK writes, explicit disconnect reasons, reconnect cleanup and chunked writes in the host regressions.
+
 ## [5.0.0] - 2026-10-21
 
 ### Changed

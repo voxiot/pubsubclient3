@@ -113,7 +113,13 @@ static_assert(MQTT_SOCKET_TIMEOUT >= 1 && MQTT_SOCKET_TIMEOUT <= 65535,
  * @brief These values indicate the current PubSubClient::state() of the client.
  * @{
  */
-#define MQTT_CONNECTION_TIMEOUT      -4  ///< The network connection timed out or server didn't respond within the keepalive time.
+#define MQTT_PACKET_TIMEOUT          -10 ///< An incoming packet did not complete within its receive deadline.
+#define MQTT_KEEPALIVE_TIMEOUT        -9  ///< An outstanding PINGREQ was not answered before the keepalive deadline.
+#define MQTT_PUBLISH_INCOMPLETE       -8  ///< A manual PUBLISH was abandoned before endPublish completed.
+#define MQTT_CONTROL_RESPONSE_FAILED  -7  ///< A mandatory protocol response could not be completely written.
+#define MQTT_WRITE_INCOMPLETE         -6  ///< An outgoing packet was partially written; the stream cannot be reused.
+#define MQTT_READ_FAILED              -5  ///< Blocking receive could not read a byte reported as available.
+#define MQTT_CONNECTION_TIMEOUT      -4  ///< Timed out waiting for the first CONNACK byte during connect.
 #define MQTT_CONNECTION_LOST         -3  ///< The network connection was lost/broken.
 #define MQTT_CONNECT_FAILED          -2  ///< The network connection failed.
 #define MQTT_DISCONNECTED            -1  ///< The client is disconnected cleanly.
@@ -297,7 +303,8 @@ class PubSubClient : public Print {
     bool readByte(uint8_t* result);
     bool readByte(uint8_t* result, size_t* pos);
     uint8_t buildHeader(uint8_t header, size_t length);
-    bool writeToClient(const uint8_t* buf, size_t size, bool packetStarted = false, bool allowRetry = true);
+    bool writeToClient(const uint8_t* buf, size_t size, bool packetStarted = false, bool allowRetry = true,
+                       int failureState = MQTT_WRITE_INCOMPLETE);
     bool writeControlResponse(const uint8_t* buf, size_t size);
     bool writeControlPacket(uint8_t header, size_t length);
     size_t writeBuffer(size_t pos, size_t size, bool packetStarted = false);

@@ -25,7 +25,7 @@ Version **5.0.0** is a major release because the packet and session integrity fi
 
 - **Incremental receive requires a build flag.** The default build excludes incremental RX state, parser and APIs. Existing incremental consumers must define `MQTT_ENABLE_INCREMENTAL_RX=1` consistently for library and application, rebuild, and keep calling `setRxBufferSize()` at runtime. See the receive profile below.
 - **Client copying is prohibited.** Copy construction and copy assignment are deleted because they duplicated owning pointers and could cause double frees. Pass `PubSubClient` by reference or pointer; create and configure a separate instance when an independent client is needed.
-- **Manual publishing is an explicit packet transaction.** Every successful `beginPublish()` must be followed by exactly the announced number of payload bytes and `endPublish()`, including for an empty payload. `write()` outside a transaction returns zero; a write exceeding the remaining payload is rejected in full. Ending with missing bytes closes the connection with `MQTT_CONNECTION_LOST`.
+- **Manual publishing is an explicit packet transaction.** Every successful `beginPublish()` must be followed by exactly the announced number of payload bytes and `endPublish()`, including for an empty payload. `write()` outside a transaction returns zero; a write exceeding the remaining payload is rejected in full. Ending with missing bytes closes the connection with `MQTT_PUBLISH_INCOMPLETE`.
 
 While a manual publish is active, `loop()` checks the connection but defers receive and keepalive processing; nested publishes, subscribe/unsubscribe, reconnect and buffer changes are refused. Finish the transaction promptly, and finish a manual publish started inside a callback before returning. Buffer changes and reconnect are also refused for the callback's lifetime. These restrictions prevent other MQTT packets from becoming bytes of an unfinished payload and prevent access to invalidated buffers.
 
@@ -92,8 +92,8 @@ A PUBLISH can require several network writes: `beginPublish()` sends the MQTT he
 | Write outcome | Before v4.0.2 | v4.0.2 |
 | --- | --- | --- |
 | No byte of the entire packet is sent; transport remains connected | Return failure and keep the connection | Unchanged: return failure and keep the connection |
-| Header is sent; the payload write sends zero bytes and cannot complete | Return failure, but leave an incomplete packet on an open connection | Return failure and close the connection with `MQTT_CONNECTION_LOST` |
-| A complete transfer chunk is sent; the next chunk sends zero bytes and cannot complete | Could keep the connection despite an incomplete packet | Close the connection with `MQTT_CONNECTION_LOST` |
+| Header is sent; the payload write sends zero bytes and cannot complete | Return failure, but leave an incomplete packet on an open connection | Return failure and close the connection with `MQTT_WRITE_INCOMPLETE` |
+| A complete transfer chunk is sent; the next chunk sends zero bytes and cannot complete | Could keep the connection despite an incomplete packet | Close the connection with `MQTT_WRITE_INCOMPLETE` |
 | A write sends some bytes, then cannot complete | Close the connection | Unchanged: close the connection |
 | Short writes eventually complete within the existing timeout | Complete the write and keep the connection | Unchanged |
 
@@ -115,7 +115,7 @@ These fixes apply to blocking and incremental receive. They do not change the ap
 | --- | --- | --- |
 | Callback disconnects and frees/resizes buffers | A later ACK could access freed memory | Buffer changes and reconnect are refused during the callback; ACK uses local bytes and is skipped after disconnect |
 | Copying a client | Copies shared owning pointers; double free on destruction | Copy construction and assignment are deleted; pass clients by reference/pointer |
-| Blocking receive stops mid-packet | Returned with an open, desynchronised socket | Closes with `MQTT_CONNECTION_TIMEOUT`; the next connection starts at a packet boundary |
+| Blocking receive stops mid-packet | Returned with an open, desynchronised socket | Closes with `MQTT_PACKET_TIMEOUT`; the next connection starts at a packet boundary |
 | Reconnect after fragmented receive | Old header/payload/discard state could consume the new session | All parser state is reset on close and before connect |
 | Malformed QoS 1/2 packet lacks an identifier | Callback-busy flag could remain set forever | Validates the complete, nonzero identifier before entering the callback; guard is cleared on callback exit |
 | Manual PUBLISH overlaps `loop()` or another operation | ACK, ping or another header could become payload bytes | Tracks the active packet and remaining payload; defers RX/keepalive until `endPublish()` |
@@ -124,7 +124,7 @@ These fixes apply to blocking and incremental receive. They do not change the ap
 | Duplicate incoming QoS 2 PUBLISH | Callback could run again before PUBREL | Tracks pending identifiers, repeats PUBREC without repeating the callback, releases on PUBREL |
 | Empty or over-65535-byte topics | Could emit malformed SUBSCRIBE/UNSUBSCRIBE/PUBLISH | Rejects without sending; CONNECT strings and private string writes have checked limits too |
 
-`beginPublish()` / `write()` / `endPublish()` is one synchronous packet transaction. Finish it promptly: while active, `loop()` only checks the connection and defers protocol processing. Nested publishes, subscribe/unsubscribe, reconnect and buffer changes are refused. `write()` outside this transaction returns zero. A write larger than the remaining payload is rejected in full (zero returned); smaller writes can still complete it. `endPublish()` with missing bytes returns false and closes with `MQTT_CONNECTION_LOST`. `disconnect()` during an incomplete transaction closes the socket directly, without inserting a DISCONNECT into the payload. Even a zero-length payload requires `endPublish()`.
+`beginPublish()` / `write()` / `endPublish()` is one synchronous packet transaction. Finish it promptly: while active, `loop()` only checks the connection and defers protocol processing. Nested publishes, subscribe/unsubscribe, reconnect and buffer changes are refused. `write()` outside this transaction returns zero. A write larger than the remaining payload is rejected in full (zero returned); smaller writes can still complete it. `endPublish()` with missing bytes returns false and closes with `MQTT_PUBLISH_INCOMPLETE`. `disconnect()` during an incomplete transaction closes the socket directly, without inserting a DISCONNECT into the payload. Even a zero-length payload requires `endPublish()`.
 
 A callback may publish synchronously or disconnect. It must finish any manual publish before returning; otherwise the connection closes rather than inserting an ACK into its payload. `setBufferSize()` and `setRxBufferSize()` return false while a callback or manual publish is active, including after a callback calls `disconnect()`. Endpoint/transport/stream changes are ignored during those operations. Topic/payload pointers remain transient: a publish inside the callback may overwrite them, so copy needed data first. The client remains single-threaded; these guards do not provide thread synchronisation.
 
@@ -138,7 +138,7 @@ Regression coverage: `tests/src/resilience_spec.cpp`, executed by `make test`, c
 
 ### Control responses and configuration checks
 
-PUBACK, PUBREC, PUBREL, PUBCOMP and PINGRESP share a required-response helper. With classic blocking receive, recoverable short writes are completed within the socket retry timeout. With incremental receive enabled by `setRxBufferSize()`, each automatic response makes exactly one transport write attempt: a partial write closes immediately with `MQTT_CONNECTION_LOST`, without retries or a retry-loop yield. In both modes, zero bytes on the first attempt closes the connection because these required replies are not queued for later.
+PUBACK, PUBREC, PUBREL, PUBCOMP and PINGRESP share a required-response helper. With classic blocking receive, recoverable short writes are completed within the socket retry timeout. With incremental receive enabled by `setRxBufferSize()`, each automatic response makes exactly one transport write attempt: a partial write closes immediately with `MQTT_CONTROL_RESPONSE_FAILED`, without retries or a retry-loop yield. In both modes, zero bytes on the first attempt closes the connection because these required replies are not queued for later.
 
 For incoming QoS 1, the callback can run before PUBACK transmission fails, including a zero-byte write. The broker may redeliver the unacknowledged PUBLISH after reconnecting, notably when resuming a persistent session. Incoming QoS 1 has no duplicate suppression here: callback redelivery is expected under at-least-once delivery, so make application side effects idempotent when needed.
 
@@ -222,3 +222,26 @@ See [CHANGELOG.md](CHANGELOG.md)
 ## License
 
 This code is released under the [MIT License](LICENSE.txt).
+
+### Explicit disconnect reasons
+
+Existing state numbers remain reserved. Known local failures now use these codes:
+
+| Code | State | Meaning |
+| --- | --- | --- |
+| -3 | `MQTT_CONNECTION_LOST` | Transport reports closure without a more specific local cause |
+| -4 | `MQTT_CONNECTION_TIMEOUT` | Waiting for the first CONNACK byte timed out |
+| -5 | `MQTT_READ_FAILED` | Blocking read failed despite available bytes |
+| -6 | `MQTT_WRITE_INCOMPLETE` | An outgoing packet could not be completed after it started |
+| -7 | `MQTT_CONTROL_RESPONSE_FAILED` | Required PUBACK/PUBREC/PUBREL/PUBCOMP/PINGRESP write failed |
+| -8 | `MQTT_PUBLISH_INCOMPLETE` | Manual PUBLISH abandoned at endPublish, disconnect, or callback return |
+| -9 | `MQTT_KEEPALIVE_TIMEOUT` | Outstanding ping exceeded its response deadline |
+| -10 | `MQTT_PACKET_TIMEOUT` | Incoming packet receive deadline expired |
+
+Update consumers that previously treated -3/-4 as exhaustive failure categories.
+Incremental receive still defers a read returning -1 despite available() instead
+of closing immediately. Required-response error output includes the wire packet
+type (PUBACK=0x40); incomplete-write output includes sent/expected byte counts.
+These diagnostics require the existing error logging configuration. No new
+instance fields, packet buffers, allocations or automatic reconnects are added.
+A transport closure alone cannot identify a duplicate Client ID or prove Internet loss.

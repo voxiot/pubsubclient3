@@ -35,6 +35,12 @@ This will create a set of executables in `./bin/`. Run each of these executables
 
 ## Arduino tests
 
+The `resilience_spec` executable includes self-presence regressions with the real
+PubSubClient parser and a simulated socket. It checks retained/live QoS 1 offline
+delivery, callback-scoped RETAIN, PUBACK success and failure, and reconnect cleanup.
+Build it both with `MQTT_ENABLE_INCREMENTAL_RX=0` and `=1`; the latter exercises
+both receive modes. These tests inject transport faults, not a live MQTT broker.
+
 *Note:* INO Tool doesn't currently play nicely with Arduino 1.5. This has broken this test suite.
 
 Without a suitable arduino plugged in, the test suite will only check the

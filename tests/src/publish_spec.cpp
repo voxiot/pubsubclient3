@@ -622,7 +622,7 @@ int test_publish_partial_write_header() {
     rc = client.publish("topic", "payload");
     IS_FALSE(rc);
 
-    IS_EQUAL(client.state(), MQTT_CONNECTION_LOST);
+    IS_EQUAL(client.state(), MQTT_WRITE_INCOMPLETE);
     IS_FALSE(shimClient.connected());
     IS_FALSE(client.connected());
 
@@ -649,7 +649,7 @@ int test_publish_partial_write_payload() {
     rc = client.publish("topic", "payload");
     IS_FALSE(rc);
 
-    IS_EQUAL(client.state(), MQTT_CONNECTION_LOST);
+    IS_EQUAL(client.state(), MQTT_WRITE_INCOMPLETE);
     IS_FALSE(shimClient.connected());
     IS_FALSE(client.connected());
 
@@ -675,7 +675,7 @@ int test_publish_zero_payload_write_after_header() {
                               : client.publish("topic", payload, sizeof(payload), qos, false);
             IS_FALSE(rc);
             IS_EQUAL(shimClient.received() - before, headerSize);
-            IS_EQUAL(client.state(), MQTT_CONNECTION_LOST);
+            IS_EQUAL(client.state(), MQTT_WRITE_INCOMPLETE);
             IS_FALSE(shimClient.connected());
             IS_FALSE(client.connected());
             IS_FALSE(client.endPublish());
@@ -720,7 +720,7 @@ int test_publish_zero_write_between_payload_buffers() {
             IS_TRUE(client.beginPublish("topic", sizeof(payload), qos, false));
             IS_TRUE(client.write(payload, sizeof(payload)) < sizeof(payload));
             IS_EQUAL(shimClient.received() - before, headerSize + acceptedPayload);
-            IS_EQUAL(client.state(), MQTT_CONNECTION_LOST);
+            IS_EQUAL(client.state(), MQTT_WRITE_INCOMPLETE);
             IS_FALSE(shimClient.connected());
             IS_FALSE(client.endPublish());
         }
@@ -746,7 +746,7 @@ int test_control_packet_zero_write_after_chunk() {
     shimClient.setWriteLimit(MQTT_MAX_TRANSFER_SIZE);
     IS_FALSE(client.subscribe(topic, MQTT_QOS1));
     IS_EQUAL(shimClient.received() - before, MQTT_MAX_TRANSFER_SIZE);
-    IS_EQUAL(client.state(), MQTT_CONNECTION_LOST);
+    IS_EQUAL(client.state(), MQTT_WRITE_INCOMPLETE);
     IS_FALSE(shimClient.connected());
     END_IT
 }
