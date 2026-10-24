@@ -6,8 +6,6 @@ Todas as alterações relevantes deste projeto serão documentadas neste arquivo
 
 O formato é baseado em [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), e este projeto segue o [Versionamento Semântico](https://semver.org/).
 
-## Ainda não lançado
-
 ## [6.0.0] - 2026-10-24
 
 ### Alterado
